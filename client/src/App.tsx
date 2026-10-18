@@ -9,6 +9,11 @@ type ChatItem = {
 
 type Files = Record<string, string>;
 
+type RuntimeError = {
+  message?: string;
+  stack?: string;
+};
+
 let nextId = 1;
 
 function statusText(data: { phase?: string; step?: number; attempt?: number }) {
@@ -27,6 +32,7 @@ export default function App() {
   const [selected, setSelected] = useState('');
   const [tab, setTab] = useState<'preview' | 'code'>('preview');
   const [previewKey, setPreviewKey] = useState(0);
+  const [runtimeError, setRuntimeError] = useState<RuntimeError | null>(null);
   const chatEnd = useRef<HTMLDivElement | null>(null);
 
   useEffect(() => {
@@ -48,10 +54,19 @@ export default function App() {
     refreshFiles().catch((err) => addItem('error', String(err.message || err)));
   }, []);
 
-  async function onSend() {
-    const text = draft.trim();
+  useEffect(() => {
+    function onMessage(event: MessageEvent) {
+      if (event.origin !== 'http://localhost:5174') return;
+      if (event.data && event.data.type === 'SANDBOX_RUNTIME_ERROR') {
+        setRuntimeError(event.data);
+      }
+    }
+    window.addEventListener('message', onMessage);
+    return () => window.removeEventListener('message', onMessage);
+  }, []);
+
+  async function runTurn(text: string) {
     if (!text || busy) return;
-    setDraft('');
     setBusy(true);
     addItem('user', text);
     try {
@@ -66,6 +81,7 @@ export default function App() {
           const names = Object.keys(data.files || {});
           setSelected((current) => (current && data.files[current] != null ? current : names[0] || ''));
           setPreviewKey((key) => key + 1);
+          setRuntimeError(null);
         }
         if (name === 'assistant_message') addItem('assistant', data.text || '');
         if (name === 'error') addItem('error', data.message || 'The turn failed');
@@ -77,12 +93,30 @@ export default function App() {
     }
   }
 
+  async function onSend() {
+    const text = draft.trim();
+    if (!text || busy) return;
+    setDraft('');
+    await runTurn(text);
+  }
+
+  function onFix() {
+    if (!runtimeError || busy) return;
+    const text =
+      'The preview crashed. Please fix this error:\n' +
+      (runtimeError.message || '') +
+      '\n' +
+      (runtimeError.stack || '');
+    runTurn(text);
+  }
+
   async function onReset() {
     if (busy) return;
     setBusy(true);
     try {
       await resetSession();
       setItems([]);
+      setRuntimeError(null);
       setPreviewKey((key) => key + 1);
       await refreshFiles();
     } catch (err: any) {
@@ -156,6 +190,18 @@ export default function App() {
             Code
           </TabButton>
         </div>
+        {runtimeError && (
+          <div className="flex items-center justify-between gap-3 border-b border-red-200 bg-red-50 px-4 py-2 text-sm text-red-800">
+            <p>This preview crashed: {runtimeError.message}</p>
+            <button
+              className="shrink-0 rounded bg-red-800 px-3 py-1 text-white disabled:opacity-50"
+              onClick={onFix}
+              disabled={busy}
+            >
+              Ask the agent to fix this
+            </button>
+          </div>
+        )}
         {tab === 'preview' ? (
           <iframe
             key={previewKey}
