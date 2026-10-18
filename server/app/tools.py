@@ -70,8 +70,17 @@ TOOL_DEFINITIONS = [
 ]
 
 
+def normalize_user_path(user_path):
+    path = str(user_path).replace('\\', '/').strip()
+    while path.startswith('./'):
+        path = path[2:]
+    if path.startswith('src/'):
+        path = path[4:]
+    return path
+
+
 def safe_path(user_path):
-    full = (ROOT / user_path).resolve()
+    full = (ROOT / normalize_user_path(user_path)).resolve()
     if ROOT not in full.parents:
         raise ValueError('Path must be inside src/')
     if full.name in LOCKED and full.parent == ROOT:
@@ -108,8 +117,8 @@ def write_file(path, content):
             return 'ERROR: use edit_file for this file'
     if len(content.encode('utf-8')) > MAX_FILE_BYTES:
         return 'ERROR: file is larger than 40 KB'
-    rel = str(path).replace('\\', '/')
-    is_new_component = rel.startswith('components/') or '/components/' in rel
+    rel = normalize_user_path(path)
+    is_new_component = rel.startswith('components/')
     if is_new_component and not full.exists():
         if _count_component_files() >= MAX_COMPONENT_FILES:
             return 'ERROR: at most 25 files are allowed under components/'
@@ -169,5 +178,5 @@ def run_tool(name, args, changed):
     if not result.startswith('ERROR:') and name in ('write_file', 'edit_file', 'delete_file'):
         path = args.get('path')
         if path:
-            changed.add(path.replace('\\', '/'))
+            changed.add(normalize_user_path(path))
     return result

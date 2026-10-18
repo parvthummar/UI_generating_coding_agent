@@ -24,6 +24,16 @@ def main():
     workspace.apply_template_app()
     changed = set()
 
+    # Paths that include the src/ prefix still land inside src/
+    result = tools.run_tool(
+        'write_file',
+        {'path': 'src/components/FromSrc.tsx', 'content': 'export const fromSrc = 1;\n'},
+        changed,
+    )
+    from_src = workspace.STAGING_SRC / 'components' / 'FromSrc.tsx'
+    nested = workspace.STAGING_SRC / 'src' / 'components' / 'FromSrc.tsx'
+    check('src/ prefix stays inside src', result.startswith('OK:') and from_src.exists() and not nested.exists(), result)
+
     # Creating a file works
     result = tools.run_tool(
         'write_file',
