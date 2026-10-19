@@ -5,6 +5,7 @@ from app.prompts import SYSTEM_PROMPT
 from app.tools import run_tool
 from app.validate import run_tsc
 from app.workspace import (
+    STAGING,
     commit_staging_to_sandbox,
     read_committed_files,
     reset_staging_from_sandbox,
@@ -18,6 +19,32 @@ NL = '\n'
 
 def sse(name, data):
     return 'event: ' + name + NL + 'data: ' + json.dumps(data) + NL + NL
+
+
+def files_cited_in_errors(errors):
+    note = ''
+    seen = set()
+    for line in errors.split('\n'):
+        raw = line.split('(')[0].strip().replace('\\', '/')
+        marker = '/src/'
+        if marker not in raw:
+            if raw.startswith('src/'):
+                rel = raw
+            else:
+                continue
+        else:
+            rel = 'src/' + raw.split(marker, 1)[1]
+        if not rel.endswith('.ts') and not rel.endswith('.tsx'):
+            continue
+        if rel in seen:
+            continue
+        seen.add(rel)
+        full = STAGING / rel
+        if not full.exists():
+            continue
+        text = full.read_text(encoding='utf-8')
+        note += NL + 'Current text of ' + rel + ':' + NL + text
+    return note
 
 
 def build_user_message(text):
@@ -100,6 +127,7 @@ def run_turn(session, user_text):
             if fix_retries > MAX_FIX_RETRIES:
                 break
             note = NL + 'Compiler check FAILED:' + NL + errors
+            note += files_cited_in_errors(errors)
             if errors == last_errors:
                 note += (
                     NL

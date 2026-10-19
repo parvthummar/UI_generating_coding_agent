@@ -1,4 +1,4 @@
-import { useEffect, useRef, useState } from 'react';
+import { useEffect, useRef, useState, type PointerEvent as ReactPointerEvent } from 'react';
 import { loadFiles, resetSession, sendMessage } from './api';
 
 type ChatItem = {
@@ -30,10 +30,14 @@ export default function App() {
   const [busy, setBusy] = useState(false);
   const [files, setFiles] = useState<Files>({});
   const [selected, setSelected] = useState('');
-  const [tab, setTab] = useState<'preview' | 'code'>('preview');
   const [previewKey, setPreviewKey] = useState(0);
   const [runtimeError, setRuntimeError] = useState<RuntimeError | null>(null);
+  const [tab, setTab] = useState<'preview' | 'code'>('preview');
+  const [chatPct, setChatPct] = useState(28);
+  const [dragging, setDragging] = useState(false);
+  const [ready, setReady] = useState(false);
   const chatEnd = useRef<HTMLDivElement | null>(null);
+  const layoutRef = useRef<HTMLDivElement | null>(null);
 
   useEffect(() => {
     chatEnd.current?.scrollIntoView({ block: 'end' });
@@ -51,7 +55,21 @@ export default function App() {
   }
 
   useEffect(() => {
-    refreshFiles().catch((err) => addItem('error', String(err.message || err)));
+    let cancelled = false;
+    async function startFresh() {
+      await resetSession();
+      if (cancelled) return;
+      await refreshFiles();
+      if (cancelled) return;
+      setPreviewKey((key) => key + 1);
+      setReady(true);
+    }
+    startFresh().catch((err) => {
+      if (!cancelled) addItem('error', String(err.message || err));
+    });
+    return () => {
+      cancelled = true;
+    };
   }, []);
 
   useEffect(() => {
@@ -128,9 +146,39 @@ export default function App() {
 
   const names = Object.keys(files);
 
+  function startResize(event: ReactPointerEvent<HTMLDivElement>) {
+    const layout = layoutRef.current;
+    if (!layout) return;
+    event.preventDefault();
+    const width = layout.getBoundingClientRect().width;
+    const startX = event.clientX;
+    const startChat = chatPct;
+    setDragging(true);
+
+    function move(ev: PointerEvent) {
+      const delta = ((ev.clientX - startX) / width) * 100;
+      setChatPct(clamp(startChat + delta, 18, 60));
+    }
+
+    function stop() {
+      setDragging(false);
+      window.removeEventListener('pointermove', move);
+      window.removeEventListener('pointerup', stop);
+    }
+
+    window.addEventListener('pointermove', move);
+    window.addEventListener('pointerup', stop);
+  }
+
   return (
-    <div className="flex h-screen bg-stone-100 text-stone-900">
-      <section className="flex w-[420px] shrink-0 flex-col border-r border-stone-300 bg-white">
+    <div
+      ref={layoutRef}
+      className={'flex h-screen bg-stone-100 text-stone-900 ' + (dragging ? 'select-none' : '')}
+    >
+      <section
+        className="flex min-w-0 shrink-0 flex-col border-r border-stone-300 bg-white"
+        style={{ width: chatPct + '%' }}
+      >
         <header className="flex items-center justify-between border-b border-stone-200 px-4 py-3">
           <div>
             <h1 className="text-lg font-semibold">UI Agent</h1>
@@ -181,6 +229,7 @@ export default function App() {
           </button>
         </form>
       </section>
+      <ResizeHandle label="Resize chat" onPointerDown={startResize} />
       <section className="flex min-w-0 flex-1 flex-col">
         <div className="flex gap-2 border-b border-stone-300 bg-white px-4 py-2">
           <TabButton active={tab === 'preview'} onClick={() => setTab('preview')}>
@@ -203,13 +252,17 @@ export default function App() {
           </div>
         )}
         {tab === 'preview' ? (
-          <iframe
-            key={previewKey}
-            title="Preview"
-            className="h-full w-full bg-white"
-            src="http://localhost:5174"
-            sandbox="allow-scripts allow-same-origin"
-          />
+          ready ? (
+            <iframe
+              key={previewKey}
+              title="Preview"
+              className={'min-h-0 w-full flex-1 border-0 bg-white ' + (dragging ? 'pointer-events-none' : '')}
+              src="http://localhost:5174"
+              sandbox="allow-scripts allow-same-origin"
+            />
+          ) : (
+            <div className="min-h-0 flex-1 bg-white" />
+          )
         ) : (
           <div className="flex min-h-0 flex-1">
             <ul className="w-56 shrink-0 overflow-auto border-r border-stone-300 bg-white text-sm">
@@ -227,7 +280,7 @@ export default function App() {
                 </li>
               ))}
             </ul>
-            <pre className="flex-1 overflow-auto p-4 text-xs leading-5">{files[selected] || ''}</pre>
+            <pre className="min-w-0 flex-1 overflow-auto p-4 text-xs leading-5">{files[selected] || ''}</pre>
           </div>
         )}
       </section>
@@ -241,6 +294,26 @@ function TabButton(props: { active: boolean; onClick: () => void; children: stri
     <button className={'rounded px-3 py-1 text-sm ' + tone} onClick={props.onClick}>
       {props.children}
     </button>
+  );
+}
+
+function clamp(value: number, min: number, max: number) {
+  return Math.min(Math.max(value, min), max);
+}
+
+function ResizeHandle(props: {
+  label: string;
+  onPointerDown: (event: ReactPointerEvent<HTMLDivElement>) => void;
+}) {
+  return (
+    <div
+      role="separator"
+      aria-orientation="vertical"
+      aria-label={props.label}
+      title={props.label}
+      className="w-1.5 shrink-0 cursor-col-resize bg-stone-300 hover:bg-stone-500"
+      onPointerDown={props.onPointerDown}
+    />
   );
 }
 
