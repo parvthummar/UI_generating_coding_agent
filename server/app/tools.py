@@ -1,5 +1,7 @@
 from pathlib import Path
 
+from app.catalog import STAGING_CATALOG, lookup_description, normalize_description, remove_description, set_description
+
 REPO = Path(__file__).resolve().parents[2]
 ROOT = (REPO / 'sandbox' / '.staging' / 'src').resolve()
 LOCKED = ['main.tsx', 'index.css']
@@ -12,7 +14,7 @@ TOOL_DEFINITIONS = [
         'type': 'function',
         'function': {
             'name': 'read_file',
-            'description': 'Read the full text of a file under src/.',
+            'description': 'Read the full source of one file under src/. The result includes the stored description and the file text.',
             'parameters': {
                 'type': 'object',
                 'properties': {
@@ -26,12 +28,13 @@ TOOL_DEFINITIONS = [
         'type': 'function',
         'function': {
             'name': 'write_file',
-            'description': 'Create a new file or overwrite a short existing file (60 lines or fewer).',
+            'description': 'Create a new file or overwrite a short existing file (60 lines or fewer). When creating a file, description is required and must be one sentence about that file. When overwriting, omit description to keep the current one.',
             'parameters': {
                 'type': 'object',
                 'properties': {
                     'path': {'type': 'string'},
                     'content': {'type': 'string'},
+                    'description': {'type': 'string'},
                 },
                 'required': ['path', 'content'],
             },
@@ -41,13 +44,14 @@ TOOL_DEFINITIONS = [
         'type': 'function',
         'function': {
             'name': 'edit_file',
-            'description': 'Replace old_str with new_str in an existing file. old_str must match exactly once.',
+            'description': 'Replace old_str with new_str in an existing file. old_str must match exactly once. Pass description only when the file responsibility changes; omit it to keep the current description.',
             'parameters': {
                 'type': 'object',
                 'properties': {
                     'path': {'type': 'string'},
                     'old_str': {'type': 'string'},
                     'new_str': {'type': 'string'},
+                    'description': {'type': 'string'},
                 },
                 'required': ['path', 'old_str', 'new_str'],
             },
@@ -101,16 +105,23 @@ def _count_component_files():
     return count
 
 
+def file_key(user_path):
+    return 'src/' + normalize_user_path(user_path)
+
+
 def read_file(path):
     full = safe_path(path)
     if not full.exists():
         return 'ERROR: file does not exist'
-    return full.read_text(encoding='utf-8')
+    description = lookup_description(STAGING_CATALOG, file_key(path))
+    text = full.read_text(encoding='utf-8')
+    return 'Description: ' + description + '\n\n' + text
 
 
-def write_file(path, content):
+def write_file(path, content, description=None):
     full = safe_path(path)
-    if full.exists():
+    is_new = not full.exists()
+    if not is_new:
         existing = full.read_text(encoding='utf-8').replace('\r\n', '\n')
         line_count = len(existing.splitlines()) or (1 if existing else 0)
         if line_count > 60:
@@ -119,15 +130,20 @@ def write_file(path, content):
         return 'ERROR: file is larger than 40 KB'
     rel = normalize_user_path(path)
     is_new_component = rel.startswith('components/')
-    if is_new_component and not full.exists():
+    if is_new_component and is_new:
         if _count_component_files() >= MAX_COMPONENT_FILES:
             return 'ERROR: at most 25 files are allowed under components/'
+    text, err = normalize_description(description, is_new)
+    if err:
+        return err
     full.parent.mkdir(parents=True, exist_ok=True)
     full.write_text(content, encoding='utf-8')
+    if text is not None:
+        set_description(STAGING_CATALOG, file_key(path), text)
     return 'OK: wrote ' + path
 
 
-def edit_file(path, old_str, new_str):
+def edit_file(path, old_str, new_str, description=None):
     full = safe_path(path)
     if not full.exists():
         return 'ERROR: file does not exist, use write_file to create it'
@@ -142,7 +158,12 @@ def edit_file(path, old_str, new_str):
     updated = text.replace(old_str, new_str)
     if len(updated.encode('utf-8')) > MAX_FILE_BYTES:
         return 'ERROR: file is larger than 40 KB'
+    new_description, err = normalize_description(description, False)
+    if err:
+        return err
     full.write_text(updated, encoding='utf-8')
+    if new_description is not None:
+        set_description(STAGING_CATALOG, file_key(path), new_description)
     return 'OK: edited ' + path
 
 
@@ -152,7 +173,9 @@ def delete_file(path):
         return 'ERROR: App.tsx cannot be deleted'
     if not full.exists():
         return 'ERROR: file does not exist'
+    key = file_key(path)
     full.unlink()
+    remove_description(STAGING_CATALOG, key)
     return 'OK: deleted ' + path
 
 
@@ -163,9 +186,9 @@ def run_tool(name, args, changed):
         if name == 'read_file':
             result = read_file(args['path'])
         elif name == 'write_file':
-            result = write_file(args['path'], args['content'])
+            result = write_file(args['path'], args['content'], args.get('description'))
         elif name == 'edit_file':
-            result = edit_file(args['path'], args['old_str'], args['new_str'])
+            result = edit_file(args['path'], args['old_str'], args['new_str'], args.get('description'))
         elif name == 'delete_file':
             result = delete_file(args['path'])
         else:

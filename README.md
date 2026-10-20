@@ -1,120 +1,205 @@
 # UI Agent
 
-Chat on the left, a live React preview on the right. You describe a UI, an agent writes the code, the TypeScript compiler checks it, and the preview updates only after that check is clean.
+A local AI coding agent that turns plain-English UI requests into React interfaces. The workspace places chat on the left and a live preview on the right. The agent edits TypeScript/TSX files through tools, checks each tool step with the TypeScript compiler, and publishes changes to the preview only after a clean commit.
 
-Demo: not recorded in this repo. A 3 to 4 minute walkthrough is listed under [Demo script](#demo-script).
+> **Demo:** A recorded demo is not included in this repository. A 3–4 minute walkthrough script is provided below.
+
+## Features
+
+- **Prompt-to-UI generation:** Build forms, dashboards, landing pages, and small interactive apps from natural-language requests.
+- **Targeted follow-up edits:** Continue refining the committed UI without regenerating the entire project.
+- **Compiler-gated changes:** Run `tsc --noEmit` during the agent loop and send compiler errors back for repair attempts.
+- **Staged changes and rollback:** Work in a staging directory. If generation reaches its limits or fails, discard staging and keep the last committed preview.
+- **Code inspection and undo:** Inspect generated source and restore the previous committed snapshot.
+- **Preview error recovery:** Send a runtime error and stack trace back to the agent with **Ask the agent to fix this**.
+
+## Requirements
+
+- Python 3.11 or newer
+- Node.js 20 or newer, including npm
+- An OpenAI API key
 
 ## Setup
 
-You need Python 3.11+, Node 20+, and an OpenAI API key.
+Run these commands from a terminal.
+
+### 1. Clone the repository and create the environment file
 
 ```bash
-git clone https://github.com/parvthummar/UI_generating_coding_agent.git && cd UI_generating_coding_agent
+git clone https://github.com/parvthummar/UI_generating_coding_agent.git
+cd UI_generating_coding_agent
+```
+
+macOS/Linux:
+
+```bash
 cp .env.example .env
 python -m venv .venv
+source .venv/bin/activate
 ```
 
-Activate the virtual environment, then paste your OpenAI API key into `.env`:
+Windows PowerShell:
+
+```powershell
+Copy-Item .env.example .env
+python -m venv .venv
+.\.venv\Scripts\Activate.ps1
+```
+
+If PowerShell prevents activation because of its execution policy, you can use Command Prompt instead and activate with `.venv\Scripts\activate.bat`.
+
+### 2. Configure the API key
+
+Open `.env` and replace the placeholder for `LLM_API_KEY` with your key. The example file also defines the model endpoint and model name:
+
+```dotenv
+LLM_BASE_URL=https://api.openai.com/v1
+LLM_MODEL=gpt-4o-mini
+LLM_API_KEY=your-api-key-here
+```
+
+Keep `.env` private and do not commit API keys.
+
+### 3. Install dependencies and start the app
+
+With the virtual environment activated, run this from the repository root:
 
 ```bash
-source .venv/bin/activate          # Windows: .venv\Scripts\activate
-npm run setup && npm run dev
+npm run setup
+npm run dev
 ```
 
-On Windows PowerShell, copy the env file with `copy .env.example .env` if `cp` is not available.
+`npm run setup` installs the root, client, and sandbox Node dependencies, installs the Python requirements, and resets the sandbox to its starter UI. `npm run dev` starts three local services:
 
-`npm run setup` installs the root, client, and sandbox packages, installs the Python requirements, and resets the sandbox to the starter screen. `npm run dev` starts the host app on port 5173, the preview on port 5174, and the API on port 8000.
+| Service | Address | Purpose |
+| --- | --- | --- |
+| Host app | [http://localhost:5173](http://localhost:5173) | Chat, status, and code view |
+| React preview | [http://localhost:5174](http://localhost:5174) | Generated UI |
+| API server | `http://localhost:8000` | Agent loop and tool execution |
 
-Open http://localhost:5173.
+Open [http://localhost:5173](http://localhost:5173) in your browser.
 
-This is a single-user prototype. There is one sandbox folder and one in-memory chat session. If the server restarts, the files on disk stay and the chat history is gone.
+> **Note:** `npm run setup` resets the sandbox to the starter screen. Run it during initial setup, or when you intentionally want to reset the local demo.
 
 ## Architecture
 
+```text
+Browser — localhost:5173                 Preview — localhost:5174
+Chat, status, code view                   Vite + React UI
+          |                                      ^
+          | POST /api/chat (SSE)                  | committed files copied
+          v                                      |
+Python API — localhost:8000 --------------------+
+One tool-calling agent loop + TypeScript gate
+          |
+          v
+      OpenAI API
 ```
-Browser  localhost:5173          Sandbox  localhost:5174
-chat, status, code view          Vite + React preview
-        |                                ^
-        | POST /api/chat (SSE)           | commit copies files
-        v                                |
-Server  localhost:8000  -----------------+
-one agent loop, four tools, tsc gate
-        |
-        v
-OpenAI API
-```
 
-The preview is a different origin because it is a different port. That is what isolates it from the host page. The iframe `sandbox` attribute, with `allow-same-origin`, would not be enough on the same origin. The API allows CORS only from `http://localhost:5173`, so preview code cannot call the API. The preview also sends a Content-Security-Policy that allows connections only to itself, and Vite is not allowed to serve files outside the sandbox folder, so the preview cannot read the API key or call the public internet. The iframe does not receive camera, microphone, or geolocation permission. This is browser isolation, not a separate virtual machine.
+The host app and preview use different ports, so they run on different origins. The iframe sandbox and browser Content Security Policy (CSP) add restrictions to the preview. CORS is configured to allow the host app origin, and Vite is restricted to serving files from the sandbox. The iframe does not receive camera, microphone, or geolocation permission.
 
-Router, editor, debugger, and reviewer are not separate agents. They are modes of one loop, driven by the system prompt and the tool results.
+These are **browser-level protections, not a dedicated operating-system or virtual-machine sandbox**. Treat this as a local prototype, not a hardened environment for running untrusted code.
 
-## Agent loop and tools
+The router, editor, debugger, and reviewer are not separate agents. They are roles handled by one loop through its system prompt and tool results.
 
-One turn:
+## How the agent loop works
 
-1. Copy `sandbox/src` to `sandbox/.staging/src`.
-2. Send the system prompt, a short history, and the committed files, labeled as the only UI on screen.
-3. The model chooses tools. The server runs them on the staging copy. At most 8 model calls, and at most 4 tool calls per step.
-4. After each step of tool calls, `tsc --noEmit` runs. Compiler errors go back to the model, up to 3 fix attempts.
-5. When the model stops and the compiler is clean, staging is copied onto `sandbox/src`. The preview refreshes.
-6. If the step limit or the fix limit is hit, staging is dropped. The preview stays as it was. The chat says the turn was rolled back and names the committed files. Follow-ups stay paused until you retry that request or explicitly send a new UI, so a later message cannot edit the old preview as if the failed UI had been created.
-7. Each clean commit stores a snapshot of the previous source. Undo restores that snapshot. New session clears the snapshots.
+For each user turn:
 
-Tools:
+1. Copy the committed source from `sandbox/src` to `sandbox/.staging/src`, and copy the file catalog to `sandbox/.staging/catalog.json`.
+2. Send the system prompt, short conversation history, and a catalog of committed paths and one-line descriptions. The initial prompt does not include the source of every file. It tells the model to call `read_file` before editing, including when the preview is still the starter screen.
+3. Let the model select tools. The server executes them against staging and updates the staged catalog. Each turn is limited to **8 model calls**, with at most **4 tool calls per step**.
+4. Run `tsc --noEmit` after each tool step. If TypeScript reports errors, send them back to the model for up to **3 fix attempts**. A compiler error also includes the current text of the files it names, so the model can repair them.
+5. If the model finishes and the compiler is clean, copy the staged source and its catalog into the committed preview. Vite refreshes from the committed source.
+6. If the call or repair limit is reached, discard the staged source and the staged catalog. The last committed preview and its descriptions remain unchanged. After a rollback, follow-up edits are paused until the failed request is retried or a new UI is explicitly requested.
+7. Save a snapshot of the previous source and catalog before each clean commit. **Undo** restores both. Starting a new session clears the snapshots and rebuilds the catalog for the starter files.
 
-| Tool | What it does |
-| --- | --- |
-| `read_file` | Returns the text of a file under `src/` |
-| `write_file` | Creates a file. Refuses to overwrite a file longer than 60 lines |
-| `edit_file` | Replaces one exact string. Use this for follow-up edits |
-| `delete_file` | Deletes a file. Refuses `App.tsx` |
+The compiler is run by the server, not exposed as a model tool, so the model cannot skip the check. A clean TypeScript compile does not guarantee that every interaction will work at runtime; preview errors can be sent back to the same repair-and-commit flow.
 
-`main.tsx` and `index.css` are locked. Paths must stay inside `sandbox/.staging/src`. Only `.ts` and `.tsx` files can be written.
+### Available tools
 
-There is no tool for the compiler. The server runs it, so the model cannot skip the check.
+| Tool | Purpose | Guardrail |
+| --- | --- | --- |
+| `read_file` | Read one file under `src/` and return its source, with the stored description | Restricted to the workspace. Locked files stay locked |
+| `write_file` | Create a source file, or replace a file of 60 lines or fewer | A new file requires a one-sentence description. Longer files must be edited |
+| `edit_file` | Replace an exact string | An optional description is stored only when the file's responsibility changes |
+| `delete_file` | Delete a source file and remove its catalog entry | Refuses to delete `App.tsx` |
+
+`main.tsx` and `index.css` are locked. File paths must stay inside `sandbox/.staging/src`, and the agent can write only `.ts` and `.tsx` files.
+
+The file catalog is `server/data/catalog.json`. It sits outside `sandbox/src`, so the preview does not serve it and the file tools cannot edit it. Each entry is a source path, such as `src/App.tsx`, and one sentence about that file. Locked files are included so the model can see their role. A missing description is shown as a labeled fallback instead of failing the turn. Descriptions are clues for choosing files; the model still has to read the source before editing.
 
 ## Design decisions and trade-offs
 
-- One loop with 4 tools instead of several AI agents: fewer model calls, easier to debug, keeps API cost down. Split only if evaluation shows a benefit.
-- A Python server with Node only for the preview and the compiler: the server is written in the language I move fastest in, at the cost of two runtimes to install.
-- A local Vite sandbox instead of a cloud sandbox: free and fast hot reload, but only one session at a time and no arbitrary packages.
-- Compiler check instead of running the app on the server: fast and deterministic, but a clean compile can still throw when a button is clicked. The preview reports that crash, and **Ask the agent to fix this** sends the error and stack through the same commit gate.
-- Search-and-replace edits instead of diffs: models handle exact strings better than line-numbered patches.
-- Fixed package list: removes made-up imports, limits what can be built. The preview already has react, react-dom, lucide-react, recharts, framer-motion, clsx, tailwind-merge, and Tailwind.
-- In-memory session: no database needed, history is lost on restart. Source snapshots for undo live on disk until a new session.
-- Files shown directly in the prompt: saves model calls, costs tokens, so it is capped at 30000 characters.
+- **One loop, four tools:** Keeps the control flow easier to inspect and limits extra model calls compared with splitting work across several agents.
+- **Python API with a Node preview/compiler:** Python handles orchestration; Node runs Vite and the TypeScript compiler. Both runtimes are required.
+- **Local Vite sandbox:** Fast feedback and no hosted sandbox cost, but only one shared sandbox/session is supported.
+- **Compiler gate instead of server-side app execution:** Provides a repeatable TypeScript check, but runtime behavior still needs to be tested in the preview.
+- **Exact-string edits:** The model uses search-and-replace for focused changes instead of line-numbered patches.
+- **Fixed dependency set:** Reduces invalid imports but limits which libraries generated UIs can use. The preview includes React, React DOM, Lucide, Recharts, Framer Motion, `clsx`, `tailwind-merge`, and Tailwind.
+- **In-memory conversation history:** No database is required, but chat history disappears when the server restarts. Source files remain on disk.
+- **File catalog in the prompt:** The model first receives each path and a one-line description, then calls `read_file` for the files it intends to change. There is no fifth tool, no embedding index, and no extra model call that writes descriptions. The model supplies a description when it creates a file.
 
-## Eval results
+## Evaluation
 
-The script is `server/scripts/eval.py`. From the `server` folder, with the virtual environment active:
+The evaluation code is `server/scripts/eval.py`; its recorded results are in [`eval/results.md`](eval/results.md). The script resets the sandbox before each new UI prompt and runs its follow-up in the same session. It waits five seconds between model turns.
+
+To run the tool tests and the model-backed evaluation, activate `.venv`, then run from the repository root:
 
 ```bash
+cd server
 python -m scripts.test_tools
 python -m scripts.eval
 ```
 
-`scripts.eval` resets the sandbox before each new UI, then runs that prompt's follow-up in the same session. It waits 5 seconds between model turns. The table it writes is in [eval/results.md](eval/results.md). Numbers below are copied from that file after the run recorded in this commit.
+The model-backed evaluation requires a valid API key and makes API calls, which may incur usage charges. Running it rewrites `eval/results.md`; results can vary by model and configuration.
 
-The recorded run finished **10 of 12** prompts with a clean commit. The finance dashboard hit the step limit after 8 model calls and 3 fix attempts, and was rolled back. Its follow-up (dark mode toggle) was refused, so it did not edit the starter app. The other follow-ups changed only the files the request needed. Full table: [eval/results.md](eval/results.md).
+### Recorded result
 
-## Known limits
+The run recorded in [`eval/results.md`](eval/results.md) produced **7 clean commits out of 12 prompts**. The landing page, todo app, pomodoro timer, login screen, kanban board, and weather card committed. The contact form and the finance dashboard were rolled back after 3 fix attempts, so their follow-ups were refused before a model call. The todo follow-up, "show how many tasks are left," also used 3 fix attempts and was rolled back. The landing-page follow-up committed. These are results from that run, not a guarantee for the next one.
 
-Single user and single session. The preview's network policy is browser CSP, not a dedicated sandbox service. The commit copies files one by one, so the preview may flash an in-between state for a moment. Smaller models sometimes ignore the package list. Complex interactions such as drag and drop may fail within 3 fix attempts. Undo restores one committed snapshot at a time and is cleared by New session.
+The finance dashboard is a useful failure-recovery demonstration. Use a successful case such as the landing page to demonstrate iterative edits.
 
-## What I would build next
+## Known limitations
 
-Per-session sandboxes, a hosted sandbox service if the preview needs stronger isolation than browser CSP, running the sandbox in the browser with a tool like Sandpack so it can be hosted, a screenshot step so the model can see its own output, and a parallel eval run.
+- Single user, one shared sandbox, and one in-memory chat session.
+- Browser CSP is not equivalent to a dedicated sandbox service or virtual machine.
+- Files are copied into the committed preview one at a time, so a brief intermediate state may appear during a commit.
+- Smaller models may ignore dependency constraints or struggle with complex interactions such as drag-and-drop within the repair limit.
+- TypeScript compilation cannot catch every runtime error or confirm visual quality.
+- Undo stores committed source snapshots and the matching descriptions. Both are cleared when a new session starts.
+- File descriptions say what a file is for. They are not a search index and they do not prove how the source behaves.
 
-## Demo script
+## Demo walkthrough (3–4 minutes)
 
-1. Create a UI, for example the finance dashboard.
-2. Send a follow-up, for example a dark mode toggle, and show in the code view that only a few lines changed.
-3. Ask to use the `date-fns` library to show relative dates. That package is not installed. The compiler reports a missing module, the log shows a retry, and the agent replaces it with plain code.
-4. Optionally click a control that crashes the preview, then use **Ask the agent to fix this**.
+This is a suggested script, not a recorded demo. The steps below avoid assuming that the finance dashboard generation succeeds.
 
-## Checks
+1. **Generate a UI:** Ask for a landing page for a fictional coffee brand with a hero, features, pricing, and footer. Show the chat, code view, and live preview.
+2. **Make a targeted edit:** Ask to change the main color to green and add a testimonials section. Show that the preview updates after the compiler gate and inspect the changed files.
+3. **Show the dependency constraint:** Ask to use `date-fns` for relative dates. It is not in the installed dependency set; show the compiler error and repair attempt rather than assuming the requested library will be installed.
+4. **Show recovery behavior:** Request the finance dashboard. In the recorded run this request was rolled back after 3 fix attempts. Explain that the previous committed preview remains intact and that a follow-up edit is blocked until the failed request is retried or a new UI is explicitly requested.
+5. **Optional runtime recovery:** If a generated control triggers a preview error, use **Ask the agent to fix this** and show the error going through the same commit gate.
+
+## Final checks
+
+Run these from the repository root before submitting:
 
 ```bash
 git check-ignore .env
-cd server && python -m scripts.test_tools
 ```
+
+The command should report `.env` as ignored. Then, with `.venv` activated:
+
+```bash
+cd server
+python -m scripts.test_tools
+```
+
+Only report test or evaluation results that you actually ran. Do not commit `.env` or API credentials.
+
+## Possible next steps
+
+- Create a separate sandbox and session per user.
+- Use a hosted sandbox service if stronger isolation is required.
+- Add screenshot-based visual feedback so the agent can inspect its rendered result.
+- Run broader, repeatable evaluation across prompts and models.

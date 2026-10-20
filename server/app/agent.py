@@ -6,6 +6,7 @@ from app.validate import run_tsc
 from app.workspace import (
     STAGING,
     commit_staging_to_sandbox,
+    read_committed_catalog,
     read_committed_files,
     reset_staging_from_sandbox,
 )
@@ -47,22 +48,17 @@ def files_cited_in_errors(errors):
 
 
 def build_user_message(text, rollback_pending=False, failed_request=''):
-    files = read_committed_files()
-    names = ', '.join(files.keys())
-    if names == '':
-        names = '(none)'
-    snapshot = ''
-    for name in files:
-        snapshot += '=== ' + name + ' ===' + NL + files[name] + NL
-    if len(snapshot) > 30000:
-        snapshot = (
-            'Files are too large to show. File list: '
-            + ', '.join(files.keys())
-            + '. Use read_file.'
-        )
+    catalog = read_committed_catalog()
+    lines = []
+    for name in catalog:
+        lines.append('- ' + name + ' — ' + catalog[name]['description'])
+    if lines:
+        catalog_text = NL.join(lines)
+    else:
+        catalog_text = '(no source files)'
     header = (
         'COMMITTED PREVIEW. These files are the only UI on screen. '
-        'Failed generations are not included. Files: ' + names + '.'
+        'Failed generations are not included.'
     )
     if rollback_pending:
         header += (
@@ -70,7 +66,16 @@ def build_user_message(text, rollback_pending=False, failed_request=''):
             + 'The previous request FAILED and was rolled back. It is not in the preview: '
             + failed_request
         )
-    return header + NL + snapshot + NL + 'User request: ' + text
+    catalog_note = (
+        'File catalog (path and description for each source file; not the file contents):'
+        + NL
+        + catalog_text
+        + NL
+        + 'Call read_file on an existing file before editing it. '
+        + 'Descriptions only help you choose which files to read. '
+        + 'Inspect the source before you change it.'
+    )
+    return header + NL + catalog_note + NL + 'User request: ' + text
 
 
 def run_turn(session, user_text, acknowledge_rollback=False):

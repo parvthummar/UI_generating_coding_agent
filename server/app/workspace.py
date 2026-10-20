@@ -1,6 +1,15 @@
 import shutil
 from pathlib import Path
 
+from app.catalog import (
+    COMMITTED_CATALOG,
+    STAGING_CATALOG,
+    STARTER_DESCRIPTIONS,
+    catalog_view,
+    reconciled_entries,
+    save_catalog,
+)
+
 REPO = Path(__file__).resolve().parents[2]
 SANDBOX_SRC = REPO / 'sandbox' / 'src'
 STAGING = REPO / 'sandbox' / '.staging'
@@ -29,9 +38,32 @@ def _copy_tree(src: Path, dest: Path):
     shutil.copytree(src, dest)
 
 
+def read_committed_catalog():
+    return catalog_view(SANDBOX_SRC, COMMITTED_CATALOG)
+
+
+def _copy_catalog_into_staging():
+    if COMMITTED_CATALOG.exists():
+        shutil.copy2(COMMITTED_CATALOG, STAGING_CATALOG)
+    elif STAGING_CATALOG.exists():
+        STAGING_CATALOG.unlink()
+    save_catalog(STAGING_CATALOG, reconciled_entries(STAGING_SRC, STAGING_CATALOG))
+
+
+def _restore_committed_catalog(snapshot_root: Path):
+    saved = snapshot_root / 'catalog.json'
+    if saved.exists():
+        COMMITTED_CATALOG.parent.mkdir(parents=True, exist_ok=True)
+        shutil.copy2(saved, COMMITTED_CATALOG)
+    elif COMMITTED_CATALOG.exists():
+        COMMITTED_CATALOG.unlink()
+    save_catalog(COMMITTED_CATALOG, reconciled_entries(SANDBOX_SRC, COMMITTED_CATALOG))
+
+
 def reset_staging_from_sandbox():
     ensure_staging_layout()
     _copy_tree(SANDBOX_SRC, STAGING_SRC)
+    _copy_catalog_into_staging()
 
 
 def _snapshot_names():
@@ -59,6 +91,8 @@ def snapshot_committed():
     dest_root = SNAPSHOTS / str(number).zfill(4)
     dest_root.mkdir(parents=True, exist_ok=True)
     _copy_tree(SANDBOX_SRC, dest_root / 'src')
+    if COMMITTED_CATALOG.exists():
+        shutil.copy2(COMMITTED_CATALOG, dest_root / 'catalog.json')
     names = _snapshot_names()
     while len(names) > MAX_SNAPSHOTS:
         shutil.rmtree(SNAPSHOTS / names[0])
@@ -74,9 +108,10 @@ def undo_committed():
     if not names:
         return None
     latest = names[-1]
-    saved = SNAPSHOTS / latest / 'src'
-    _copy_tree(saved, SANDBOX_SRC)
-    shutil.rmtree(SNAPSHOTS / latest)
+    snapshot_root = SNAPSHOTS / latest
+    _copy_tree(snapshot_root / 'src', SANDBOX_SRC)
+    _restore_committed_catalog(snapshot_root)
+    shutil.rmtree(snapshot_root)
     reset_staging_from_sandbox()
     return read_committed_files()
 
@@ -98,6 +133,10 @@ def commit_staging_to_sandbox():
             (SANDBOX_SRC / rel).unlink(missing_ok=True)
 
     _remove_empty_dirs(SANDBOX_SRC)
+    if STAGING_CATALOG.exists():
+        COMMITTED_CATALOG.parent.mkdir(parents=True, exist_ok=True)
+        shutil.copy2(STAGING_CATALOG, COMMITTED_CATALOG)
+    save_catalog(COMMITTED_CATALOG, reconciled_entries(SANDBOX_SRC, COMMITTED_CATALOG))
 
 
 def read_committed_files():
@@ -137,5 +176,11 @@ def apply_template_app():
         shutil.rmtree(components)
     text = TEMPLATE_APP.read_text(encoding='utf-8')
     (SANDBOX_SRC / 'App.tsx').write_text(text, encoding='utf-8')
+    entries = reconciled_entries(
+        SANDBOX_SRC,
+        COMMITTED_CATALOG,
+        {'src/App.tsx': {'description': STARTER_DESCRIPTIONS['src/App.tsx']}},
+    )
+    save_catalog(COMMITTED_CATALOG, entries)
     ensure_staging_layout()
     reset_staging_from_sandbox()
