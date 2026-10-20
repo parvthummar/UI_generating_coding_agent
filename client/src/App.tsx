@@ -1,5 +1,5 @@
 import { useEffect, useRef, useState, type PointerEvent as ReactPointerEvent } from 'react';
-import { loadFiles, resetSession, sendMessage } from './api';
+import { loadFiles, resetSession, sendMessage, undoCommit } from './api';
 
 type ChatItem = {
   id: number;
@@ -12,6 +12,10 @@ type Files = Record<string, string>;
 type RuntimeError = {
   message?: string;
   stack?: string;
+};
+
+type Rollback = {
+  failedRequest: string;
 };
 
 let nextId = 1;
@@ -32,6 +36,8 @@ export default function App() {
   const [selected, setSelected] = useState('');
   const [previewKey, setPreviewKey] = useState(0);
   const [runtimeError, setRuntimeError] = useState<RuntimeError | null>(null);
+  const [rollback, setRollback] = useState<Rollback | null>(null);
+  const [canUndo, setCanUndo] = useState(false);
   const [tab, setTab] = useState<'preview' | 'code'>('preview');
   const [chatPct, setChatPct] = useState(28);
   const [dragging, setDragging] = useState(false);
@@ -57,8 +63,6 @@ export default function App() {
   useEffect(() => {
     let cancelled = false;
     async function startFresh() {
-      await resetSession();
-      if (cancelled) return;
       await refreshFiles();
       if (cancelled) return;
       setPreviewKey((key) => key + 1);
@@ -76,17 +80,26 @@ export default function App() {
     function onMessage(event: MessageEvent) {
       if (event.origin !== 'http://localhost:5174') return;
       if (event.data && event.data.type === 'SANDBOX_RUNTIME_ERROR') {
+        const message = event.data.message || 'Unknown runtime error';
         setRuntimeError(event.data);
+        addItem('error', 'Preview crashed: ' + message);
       }
     }
     window.addEventListener('message', onMessage);
     return () => window.removeEventListener('message', onMessage);
   }, []);
 
-  async function runTurn(text: string) {
+  function applyFiles(next: Files) {
+    setFiles(next);
+    const names = Object.keys(next);
+    setSelected((current) => (current && next[current] != null ? current : names[0] || ''));
+  }
+
+  async function runTurn(text: string, acknowledgeRollback = false) {
     if (!text || busy) return;
     setBusy(true);
     addItem('user', text);
+    if (acknowledgeRollback) setRollback(null);
     try {
       await sendMessage(text, (name, data) => {
         if (name === 'status') addItem('status', statusText(data));
@@ -95,15 +108,20 @@ export default function App() {
           addItem('tool', data.name + path + ', ' + (data.ok ? 'ok' : 'failed'));
         }
         if (name === 'files_updated') {
-          setFiles(data.files || {});
-          const names = Object.keys(data.files || {});
-          setSelected((current) => (current && data.files[current] != null ? current : names[0] || ''));
+          applyFiles(data.files || {});
           setPreviewKey((key) => key + 1);
           setRuntimeError(null);
+          setRollback(null);
+          setCanUndo(true);
         }
         if (name === 'assistant_message') addItem('assistant', data.text || '');
-        if (name === 'error') addItem('error', data.message || 'The turn failed');
-      });
+        if (name === 'error') {
+          addItem('error', data.message || 'The turn failed');
+          if (data.code === 'rolled_back' || data.code === 'followup_blocked') {
+            setRollback({ failedRequest: data.failed_request || '' });
+          }
+        }
+      }, acknowledgeRollback);
     } catch (err: any) {
       addItem('error', err.message || String(err));
     } finally {
@@ -114,18 +132,59 @@ export default function App() {
   async function onSend() {
     const text = draft.trim();
     if (!text || busy) return;
+    if (rollback) {
+      addItem(
+        'error',
+        'This follow-up was not sent. The last generation was rolled back, so that UI is not in the preview. Retry it, or send this as a new UI.',
+      );
+      return;
+    }
     setDraft('');
-    await runTurn(text);
+    await runTurn(text, false);
+  }
+
+  async function onRetry() {
+    if (!rollback || busy) return;
+    const text = rollback.failedRequest;
+    if (!text) return;
+    await runTurn(text, true);
+  }
+
+  async function onSendAsNew() {
+    const text = draft.trim();
+    if (!text || busy) return;
+    setDraft('');
+    await runTurn(text, true);
   }
 
   function onFix() {
     if (!runtimeError || busy) return;
     const text =
-      'The preview crashed. Please fix this error:\n' +
+      'The preview compiled, then crashed at runtime. Repair the committed UI so this interaction works.\n' +
+      'Error: ' +
       (runtimeError.message || '') +
       '\n' +
+      'Stack: ' +
       (runtimeError.stack || '');
-    runTurn(text);
+    runTurn(text, rollback != null);
+  }
+
+  async function onUndo() {
+    if (busy || !canUndo) return;
+    setBusy(true);
+    try {
+      const result = await undoCommit();
+      applyFiles(result.files);
+      setPreviewKey((key) => key + 1);
+      setRuntimeError(null);
+      setRollback(null);
+      setCanUndo(result.remaining > 0);
+      addItem('assistant', 'Restored the previous committed UI.');
+    } catch (err: any) {
+      addItem('error', err.message || String(err));
+    } finally {
+      setBusy(false);
+    }
   }
 
   async function onReset() {
@@ -135,6 +194,8 @@ export default function App() {
       await resetSession();
       setItems([]);
       setRuntimeError(null);
+      setRollback(null);
+      setCanUndo(false);
       setPreviewKey((key) => key + 1);
       await refreshFiles();
     } catch (err: any) {
@@ -184,13 +245,22 @@ export default function App() {
             <h1 className="text-lg font-semibold">UI Agent</h1>
             <p className="text-xs text-stone-500">One session on this machine</p>
           </div>
-          <button
-            className="rounded border border-stone-300 px-3 py-1 text-sm disabled:opacity-50"
-            onClick={onReset}
-            disabled={busy}
-          >
-            New session
-          </button>
+          <div className="flex gap-2">
+            <button
+              className="rounded border border-stone-300 px-3 py-1 text-sm disabled:opacity-50"
+              onClick={onUndo}
+              disabled={busy || !canUndo}
+            >
+              Undo
+            </button>
+            <button
+              className="rounded border border-stone-300 px-3 py-1 text-sm disabled:opacity-50"
+              onClick={onReset}
+              disabled={busy}
+            >
+              New session
+            </button>
+          </div>
         </header>
         <div className="flex-1 space-y-2 overflow-auto px-4 py-3">
           {items.length === 0 && (
@@ -220,10 +290,36 @@ export default function App() {
               }
             }}
           />
+          {rollback && (
+            <div className="mb-2 rounded border border-red-200 bg-red-50 px-3 py-2 text-sm text-red-800">
+              <p>
+                The last generation was rolled back. The preview is still the committed UI. Follow-ups stay
+                paused so they cannot treat that missing UI as if it were created.
+              </p>
+              <div className="mt-2 flex flex-wrap gap-2">
+                <button
+                  className="rounded bg-red-800 px-3 py-1 text-white disabled:opacity-50"
+                  type="button"
+                  onClick={onRetry}
+                  disabled={busy || rollback.failedRequest === ''}
+                >
+                  Retry failed request
+                </button>
+                <button
+                  className="rounded border border-red-300 px-3 py-1 disabled:opacity-50"
+                  type="button"
+                  onClick={onSendAsNew}
+                  disabled={busy || draft.trim() === ''}
+                >
+                  Send as a new UI
+                </button>
+              </div>
+            </div>
+          )}
           <button
             className="mt-2 rounded bg-stone-900 px-4 py-2 text-sm text-white disabled:opacity-50"
             type="submit"
-            disabled={busy || draft.trim() === ''}
+            disabled={busy || draft.trim() === '' || rollback != null}
           >
             {busy ? 'Working' : 'Send'}
           </button>
@@ -238,10 +334,18 @@ export default function App() {
           <TabButton active={tab === 'code'} onClick={() => setTab('code')}>
             Code
           </TabButton>
+          <p className="ml-auto self-center text-xs text-stone-500">
+            {rollback ? 'Committed preview, last generation rolled back' : 'Committed preview'}
+          </p>
         </div>
         {runtimeError && (
-          <div className="flex items-center justify-between gap-3 border-b border-red-200 bg-red-50 px-4 py-2 text-sm text-red-800">
-            <p>This preview crashed: {runtimeError.message}</p>
+          <div className="flex items-start justify-between gap-3 border-b border-red-200 bg-red-50 px-4 py-2 text-sm text-red-800">
+            <div className="min-w-0">
+              <p>This preview crashed: {runtimeError.message}</p>
+              {runtimeError.stack && (
+                <pre className="mt-1 max-h-16 overflow-auto whitespace-pre-wrap text-xs">{runtimeError.stack}</pre>
+              )}
+            </div>
             <button
               className="shrink-0 rounded bg-red-800 px-3 py-1 text-white disabled:opacity-50"
               onClick={onFix}
@@ -258,7 +362,9 @@ export default function App() {
               title="Preview"
               className={'min-h-0 w-full flex-1 border-0 bg-white ' + (dragging ? 'pointer-events-none' : '')}
               src="http://localhost:5174"
-              sandbox="allow-scripts allow-same-origin"
+              sandbox="allow-scripts allow-same-origin allow-modals"
+              referrerPolicy="no-referrer"
+              allow=""
             />
           ) : (
             <div className="min-h-0 flex-1 bg-white" />

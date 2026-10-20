@@ -5,6 +5,8 @@ REPO = Path(__file__).resolve().parents[2]
 SANDBOX_SRC = REPO / 'sandbox' / 'src'
 STAGING = REPO / 'sandbox' / '.staging'
 STAGING_SRC = STAGING / 'src'
+SNAPSHOTS = REPO / 'sandbox' / '.snapshots'
+MAX_SNAPSHOTS = 20
 TEMPLATE_APP = REPO / 'server' / 'template' / 'src' / 'App.tsx'
 STAGING_TSCONFIG = STAGING / 'tsconfig.json'
 
@@ -32,8 +34,56 @@ def reset_staging_from_sandbox():
     _copy_tree(SANDBOX_SRC, STAGING_SRC)
 
 
+def _snapshot_names():
+    if not SNAPSHOTS.exists():
+        return []
+    names = []
+    for path in SNAPSHOTS.iterdir():
+        if path.is_dir() and path.name.isdigit():
+            names.append(path.name)
+    names.sort()
+    return names
+
+
+def clear_snapshots():
+    if SNAPSHOTS.exists():
+        shutil.rmtree(SNAPSHOTS)
+
+
+def snapshot_committed():
+    SNAPSHOTS.mkdir(parents=True, exist_ok=True)
+    names = _snapshot_names()
+    number = 1
+    if names:
+        number = int(names[-1]) + 1
+    dest_root = SNAPSHOTS / str(number).zfill(4)
+    dest_root.mkdir(parents=True, exist_ok=True)
+    _copy_tree(SANDBOX_SRC, dest_root / 'src')
+    names = _snapshot_names()
+    while len(names) > MAX_SNAPSHOTS:
+        shutil.rmtree(SNAPSHOTS / names[0])
+        names = names[1:]
+
+
+def snapshot_count():
+    return len(_snapshot_names())
+
+
+def undo_committed():
+    names = _snapshot_names()
+    if not names:
+        return None
+    latest = names[-1]
+    saved = SNAPSHOTS / latest / 'src'
+    _copy_tree(saved, SANDBOX_SRC)
+    shutil.rmtree(SNAPSHOTS / latest)
+    reset_staging_from_sandbox()
+    return read_committed_files()
+
+
 def commit_staging_to_sandbox():
     ensure_staging_layout()
+    snapshot_committed()
     staging_files = _list_src_files(STAGING_SRC)
     sandbox_files = _list_src_files(SANDBOX_SRC)
 
@@ -80,6 +130,7 @@ def _remove_empty_dirs(root: Path):
 
 
 def apply_template_app():
+    clear_snapshots()
     SANDBOX_SRC.mkdir(parents=True, exist_ok=True)
     components = SANDBOX_SRC / 'components'
     if components.exists():

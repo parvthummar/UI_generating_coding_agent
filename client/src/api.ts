@@ -3,11 +3,15 @@ export type ChatEvent = {
   data: any;
 };
 
-export async function sendMessage(text: string, onEvent: (name: string, data: any) => void) {
+export async function sendMessage(
+  text: string,
+  onEvent: (name: string, data: any) => void,
+  acknowledgeRollback = false,
+) {
   const res = await fetch('http://localhost:8000/api/chat', {
     method: 'POST',
     headers: { 'Content-Type': 'application/json' },
-    body: JSON.stringify({ message: text }),
+    body: JSON.stringify({ message: text, acknowledge_rollback: acknowledgeRollback }),
   });
   if (!res.ok) {
     let message = 'Request failed';
@@ -47,4 +51,11 @@ export async function loadFiles(): Promise<Record<string, string>> {
 export async function resetSession() {
   const res = await fetch('http://localhost:8000/api/reset', { method: 'POST' });
   if (!res.ok) throw new Error('Could not reset the session');
+}
+
+export async function undoCommit(): Promise<{ files: Record<string, string>; remaining: number }> {
+  const res = await fetch('http://localhost:8000/api/undo', { method: 'POST' });
+  const body = await res.json().catch(() => ({}));
+  if (!res.ok) throw new Error(body.error || 'Could not undo');
+  return body;
 }

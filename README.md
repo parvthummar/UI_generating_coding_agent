@@ -44,7 +44,7 @@ one agent loop, four tools, tsc gate
 OpenAI API
 ```
 
-The preview is a different origin because it is a different port. That is what isolates it from the host page. The iframe `sandbox` attribute, with `allow-same-origin`, would not be enough on the same origin. The API allows CORS only from `http://localhost:5173`, so preview code cannot call the API. Generated code can still reach the public internet.
+The preview is a different origin because it is a different port. That is what isolates it from the host page. The iframe `sandbox` attribute, with `allow-same-origin`, would not be enough on the same origin. The API allows CORS only from `http://localhost:5173`, so preview code cannot call the API. The preview also sends a Content-Security-Policy that allows connections only to itself, and Vite is not allowed to serve files outside the sandbox folder, so the preview cannot read the API key or call the public internet. The iframe does not receive camera, microphone, or geolocation permission. This is browser isolation, not a separate virtual machine.
 
 Router, editor, debugger, and reviewer are not separate agents. They are modes of one loop, driven by the system prompt and the tool results.
 
@@ -53,11 +53,12 @@ Router, editor, debugger, and reviewer are not separate agents. They are modes o
 One turn:
 
 1. Copy `sandbox/src` to `sandbox/.staging/src`.
-2. Send the system prompt, a short history, and a snapshot of the current files.
+2. Send the system prompt, a short history, and the committed files, labeled as the only UI on screen.
 3. The model chooses tools. The server runs them on the staging copy. At most 8 model calls, and at most 4 tool calls per step.
 4. After each step of tool calls, `tsc --noEmit` runs. Compiler errors go back to the model, up to 3 fix attempts.
 5. When the model stops and the compiler is clean, staging is copied onto `sandbox/src`. The preview refreshes.
-6. If the step limit or the fix limit is hit, staging is dropped. The preview stays as it was, and the chat says the turn was rolled back.
+6. If the step limit or the fix limit is hit, staging is dropped. The preview stays as it was. The chat says the turn was rolled back and names the committed files. Follow-ups stay paused until you retry that request or explicitly send a new UI, so a later message cannot edit the old preview as if the failed UI had been created.
+7. Each clean commit stores a snapshot of the previous source. Undo restores that snapshot. New session clears the snapshots.
 
 Tools:
 
@@ -77,10 +78,10 @@ There is no tool for the compiler. The server runs it, so the model cannot skip 
 - One loop with 4 tools instead of several AI agents: fewer model calls, easier to debug, keeps API cost down. Split only if evaluation shows a benefit.
 - A Python server with Node only for the preview and the compiler: the server is written in the language I move fastest in, at the cost of two runtimes to install.
 - A local Vite sandbox instead of a cloud sandbox: free and fast hot reload, but only one session at a time and no arbitrary packages.
-- Compiler check instead of running the app on the server: fast and deterministic, but it cannot catch runtime bugs, which is why the preview reports crashes.
+- Compiler check instead of running the app on the server: fast and deterministic, but a clean compile can still throw when a button is clicked. The preview reports that crash, and **Ask the agent to fix this** sends the error and stack through the same commit gate.
 - Search-and-replace edits instead of diffs: models handle exact strings better than line-numbered patches.
 - Fixed package list: removes made-up imports, limits what can be built. The preview already has react, react-dom, lucide-react, recharts, framer-motion, clsx, tailwind-merge, and Tailwind.
-- In-memory session: no database needed, history is lost on restart.
+- In-memory session: no database needed, history is lost on restart. Source snapshots for undo live on disk until a new session.
 - Files shown directly in the prompt: saves model calls, costs tokens, so it is capped at 30000 characters.
 
 ## Eval results
@@ -96,13 +97,15 @@ python -m scripts.eval
 
 The recorded run finished **11 of 12** prompts with a clean commit. The finance dashboard hit the step limit after 8 model calls and 3 fix attempts, and was rolled back. Its follow-up (dark mode toggle) then edited the starter app, not a dashboard. The other follow-ups changed only the files the request needed. Full table: [eval/results.md](eval/results.md).
 
+That follow-up path is now refused. After a rollback the server will not run a later edit until the failed request is retried or the user sends a new UI on purpose. The committed preview is named in the prompt so the model is not told that a rolled-back screen exists.
+
 ## Known limits
 
-Single user and single session. Generated code can reach the public internet. The commit copies files one by one, so the preview may flash an in-between state for a moment. Smaller models sometimes ignore the package list. Complex interactions such as drag and drop may fail within 3 fix attempts. There is no undo.
+Single user and single session. The preview's network policy is browser CSP, not a dedicated sandbox service. The commit copies files one by one, so the preview may flash an in-between state for a moment. Smaller models sometimes ignore the package list. Complex interactions such as drag and drop may fail within 3 fix attempts. Undo restores one committed snapshot at a time and is cleared by New session.
 
 ## What I would build next
 
-Per-session sandboxes, an undo button backed by a git repo inside the sandbox, running the sandbox in the browser with a tool like Sandpack so it can be hosted, a screenshot step so the model can see its own output, and a parallel eval run.
+Per-session sandboxes, a hosted sandbox service if the preview needs stronger isolation than browser CSP, running the sandbox in the browser with a tool like Sandpack so it can be hosted, a screenshot step so the model can see its own output, and a parallel eval run.
 
 ## Demo script
 

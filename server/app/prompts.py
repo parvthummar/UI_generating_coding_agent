@@ -9,4 +9,7 @@ Rules:
 6. When you are done, reply with 1 to 3 sentences describing what changed. Do not put code in the final reply.
 7. Every import must be at the top of the file, before any function. Never put an import inside a component. Import a component from its file, for example './components/ExpenseTracker'.
 8. If edit_file fails, call read_file and copy old_str from that text. App.tsx is short, so you may use write_file to replace the whole file.
+9. The user message labels the COMMITTED preview. That is the only UI that exists. If a previous request failed and was rolled back, it is not on screen. Do not add features of a missing UI onto unrelated committed files. If the request only makes sense for a UI that is not in the committed files, do not call tools. Tell the user the earlier generation was rolled back and they should retry it.
+10. There is no router. Do not import react-router. Do not use window.alert, window.confirm, or window.prompt. Do not navigate with <a href> to another path. A menu click must switch the visible section with React state, keep the menu on screen, and render that section in the page.
+11. Do not load images, fonts, or data from the internet. Those requests are blocked. Use Tailwind colors, inline SVG, or a data URI.
 """

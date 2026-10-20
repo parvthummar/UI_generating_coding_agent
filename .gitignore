@@ -4,6 +4,7 @@ __pycache__/
 *.py[cod]
 .env
 sandbox/.staging/
+sandbox/.snapshots/
 sandbox/src/App.tsx
 sandbox/src/components/
 *.log

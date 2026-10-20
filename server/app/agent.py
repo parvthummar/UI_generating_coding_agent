@@ -1,6 +1,5 @@
 import json
 
-from app.llm import call_llm
 from app.prompts import SYSTEM_PROMPT
 from app.tools import run_tool
 from app.validate import run_tsc
@@ -47,8 +46,11 @@ def files_cited_in_errors(errors):
     return note
 
 
-def build_user_message(text):
+def build_user_message(text, rollback_pending=False, failed_request=''):
     files = read_committed_files()
+    names = ', '.join(files.keys())
+    if names == '':
+        names = '(none)'
     snapshot = ''
     for name in files:
         snapshot += '=== ' + name + ' ===' + NL + files[name] + NL
@@ -58,18 +60,56 @@ def build_user_message(text):
             + ', '.join(files.keys())
             + '. Use read_file.'
         )
-    return 'Current project files:' + NL + snapshot + NL + 'User request: ' + text
+    header = (
+        'COMMITTED PREVIEW. These files are the only UI on screen. '
+        'Failed generations are not included. Files: ' + names + '.'
+    )
+    if rollback_pending:
+        header += (
+            NL
+            + 'The previous request FAILED and was rolled back. It is not in the preview: '
+            + failed_request
+        )
+    return header + NL + snapshot + NL + 'User request: ' + text
 
 
-def run_turn(session, user_text):
+def run_turn(session, user_text, acknowledge_rollback=False):
+    if session.rollback_pending and not acknowledge_rollback:
+        session.add_turn(
+            user_text,
+            'Not applied. A previous generation was rolled back, so this follow-up did not run.',
+            [],
+        )
+        yield sse(
+            'error',
+            {
+                'code': 'followup_blocked',
+                'message': (
+                    'The last generation was rolled back, so that UI is not in the preview. '
+                    'This follow-up was not applied. Retry the failed request, or send this as a new UI.'
+                ),
+                'failed_request': session.failed_request,
+                'committed_files': list(read_committed_files().keys()),
+            },
+        )
+        return
+
+    failed_request = session.failed_request
+    show_failure = session.rollback_pending
+    if acknowledge_rollback and session.rollback_pending:
+        session.mark_committed()
+
     reset_staging_from_sandbox()
     messages = [{'role': 'system', 'content': SYSTEM_PROMPT}]
     messages = messages + session.history
-    messages.append({'role': 'user', 'content': build_user_message(user_text)})
+    messages.append(
+        {'role': 'user', 'content': build_user_message(user_text, show_failure, failed_request)}
+    )
     changed = set()
     checked_clean = False
     fix_retries = 0
     last_errors = ''
+    from app.llm import call_llm
 
     for step in range(1, MAX_STEPS + 1):
         yield sse('status', {'phase': 'thinking', 'step': step})
@@ -90,6 +130,7 @@ def run_turn(session, user_text):
         if len(tool_calls) == 0:
             if len(changed) == 0:
                 session.add_turn(user_text, reply['content'], [])
+                session.mark_committed()
                 yield sse('assistant_message', {'text': reply['content']})
                 return
             if not checked_clean:
@@ -105,6 +146,7 @@ def run_turn(session, user_text):
                     continue
             commit_staging_to_sandbox()
             session.add_turn(user_text, reply['content'], sorted(changed))
+            session.mark_committed()
             yield sse('files_updated', {'files': read_committed_files()})
             yield sse('assistant_message', {'text': reply['content']})
             return
@@ -141,10 +183,22 @@ def run_turn(session, user_text):
     detail = last_errors[:500]
     if detail == '':
         detail = 'The step limit was reached.'
-    session.add_turn(user_text, 'Turn failed and was rolled back.', [])
+    session.add_turn(
+        user_text,
+        'FAILED and rolled back. No files were committed. The preview does not include this request.',
+        [],
+    )
+    session.mark_rolled_back(user_text)
     yield sse(
         'error',
         {
-            'message': 'I could not finish this change cleanly, so I rolled it back. ' + detail,
+            'code': 'rolled_back',
+            'message': (
+                'I could not finish this change cleanly, so I rolled it back. '
+                'The preview is still the last committed UI. '
+                'Follow-ups are paused until you retry or start a new UI. ' + detail
+            ),
+            'failed_request': user_text,
+            'committed_files': list(read_committed_files().keys()),
         },
     )
