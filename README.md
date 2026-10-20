@@ -9,7 +9,7 @@ Demo: not recorded in this repo. A 3 to 4 minute walkthrough is listed under [De
 You need Python 3.11+, Node 20+, and an OpenAI API key.
 
 ```bash
-git clone <repo-url> && cd ui-agent
+git clone https://github.com/parvthummar/UI_generating_coding_agent.git && cd UI_generating_coding_agent
 cp .env.example .env
 python -m venv .venv
 ```
@@ -95,9 +95,7 @@ python -m scripts.eval
 
 `scripts.eval` resets the sandbox before each new UI, then runs that prompt's follow-up in the same session. It waits 5 seconds between model turns. The table it writes is in [eval/results.md](eval/results.md). Numbers below are copied from that file after the run recorded in this commit.
 
-The recorded run finished **11 of 12** prompts with a clean commit. The finance dashboard hit the step limit after 8 model calls and 3 fix attempts, and was rolled back. Its follow-up (dark mode toggle) then edited the starter app, not a dashboard. The other follow-ups changed only the files the request needed. Full table: [eval/results.md](eval/results.md).
-
-That follow-up path is now refused. After a rollback the server will not run a later edit until the failed request is retried or the user sends a new UI on purpose. The committed preview is named in the prompt so the model is not told that a rolled-back screen exists.
+The recorded run finished **10 of 12** prompts with a clean commit. The finance dashboard hit the step limit after 8 model calls and 3 fix attempts, and was rolled back. Its follow-up (dark mode toggle) was refused, so it did not edit the starter app. The other follow-ups changed only the files the request needed. Full table: [eval/results.md](eval/results.md).
 
 ## Known limits
 
