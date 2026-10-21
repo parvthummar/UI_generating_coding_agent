@@ -4,7 +4,7 @@
 
 UI Agent is a chat-driven coding agent that writes React + TypeScript + Tailwind code, renders it in a live preview next to the chat, and edits it on follow-up requests. Every change has to pass a type check, a production build, and a headless-browser render before it reaches the preview. When the agent makes a mistake, the errors go back to it and it fixes its own code.
 
-> **Demo video:** _add link here_. The recording shows a multi-turn session: building a UI, a targeted follow-up edit, and an error the agent recovers from.
+> **Demo video:** [Watch the recording on Google Drive](https://drive.google.com/file/d/1RnDOSTETm6-wztFoxkaatlUpJ1fuHo4t/view?usp=sharing). The recording shows a multi-turn session: building a UI, a targeted follow-up edit, and an error the agent recovers from.
 
 ---
 
