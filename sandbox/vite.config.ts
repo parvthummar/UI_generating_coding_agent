@@ -40,7 +40,7 @@ export default defineConfig({
       overlay: false,
     },
     watch: {
-      ignored: ['**/.staging/**', '**/.snapshots/**'],
+      ignored: ['**/.staging/**', '**/.snapshots/**', '**/file_descriptions.json'],
     },
   },
 });

@@ -3,7 +3,7 @@
   "private": true,
   "version": "0.0.0",
   "scripts": {
-    "setup": "npm install && npm install --prefix client && npm install --prefix sandbox && pip install -r server/requirements.txt && cd server && python -m scripts.reset",
+    "setup": "npm install && npm install --prefix client && npm install --prefix sandbox && npx --prefix sandbox playwright install chromium && pip install -r server/requirements.txt && cd server && python -m scripts.reset",
     "dev": "concurrently -n client,sandbox,server -c blue,green,magenta \"npm run dev --prefix client\" \"npm run dev --prefix sandbox\" \"python -m uvicorn app.main:app --app-dir server --port 8000\""
   },
   "devDependencies": {

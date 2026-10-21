@@ -5,6 +5,7 @@ __pycache__/
 .env
 sandbox/.staging/
 sandbox/.snapshots/
+sandbox/file_descriptions.json
 sandbox/src/App.tsx
 sandbox/src/components/
 *.log

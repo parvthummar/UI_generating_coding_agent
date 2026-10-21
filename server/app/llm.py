@@ -9,7 +9,19 @@ from openai import OpenAI, RateLimitError
 from app.tools import TOOL_DEFINITIONS
 
 load_dotenv(Path(__file__).resolve().parents[2] / '.env')
-client = OpenAI(base_url=os.environ['LLM_BASE_URL'], api_key=os.environ['LLM_API_KEY'])
+_client = None
+MAX_OUTPUT_TOKENS = 16000
+
+
+def get_client():
+    global _client
+    if _client is None:
+        base = os.environ.get('LLM_BASE_URL', '')
+        key = os.environ.get('LLM_API_KEY', '')
+        if base == '' or key == '':
+            raise RuntimeError('LLM_BASE_URL and LLM_API_KEY must be set in the environment')
+        _client = OpenAI(base_url=base, api_key=key)
+    return _client
 
 
 def call_llm(messages):
@@ -17,12 +29,12 @@ def call_llm(messages):
     wait = 2
     for attempt in range(1, 5):
         try:
-            response = client.chat.completions.create(
+            response = get_client().chat.completions.create(
                 model=os.environ['LLM_MODEL'],
                 messages=messages,
                 tools=TOOL_DEFINITIONS,
                 temperature=0.2,
-                max_tokens=1200,
+                max_tokens=MAX_OUTPUT_TOKENS,
             )
             usage = response.usage
             if usage is not None:

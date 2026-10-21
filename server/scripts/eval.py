@@ -106,32 +106,77 @@ def changed_files(before, after):
     return changed
 
 
-def run_prompt(session, prompt):
+def run_prompt(session, prompt, phase):
     before = read_committed_files()
     started = time.perf_counter()
     model_calls = 0
     fix_attempts = 0
+    tool_errors = 0
     committed = False
     failed = False
+    reason = ''
+    error_message = ''
     for raw in run_turn(session, prompt):
         name, data = parse_event(raw)
         if name == 'status' and data.get('phase') == 'thinking':
             model_calls += 1
         if name == 'status' and data.get('phase') == 'fixing_error':
             fix_attempts += 1
+            if data.get('reason'):
+                reason = data.get('reason')
+        if name == 'tool_call' and not data.get('ok'):
+            tool_errors += 1
         if name == 'files_updated':
             committed = True
+            reason = ''
         if name == 'error':
             failed = True
+            reason = data.get('reason') or data.get('code') or 'error'
+            error_message = data.get('message') or ''
     seconds = round(time.perf_counter() - started, 1)
     files = changed_files(before, read_committed_files())
+    if failed and reason == 'followup_blocked':
+        result = 'blocked'
+    elif committed and not failed:
+        result = 'committed'
+    elif failed:
+        result = 'rolled_back'
+    else:
+        result = 'no_change'
     return {
+        'phase': phase,
         'prompt': prompt,
-        'build_passed': committed and not failed,
+        'build_passed': result == 'committed',
+        'result': result,
+        'reason': reason,
         'model_calls': model_calls,
         'fix_attempts': fix_attempts,
+        'tool_errors': tool_errors,
         'seconds': seconds,
         'files_changed': files,
+        'detail': error_message[:500],
+    }
+
+
+def skipped_followup(follow, initial_id):
+    return {
+        'id': follow['id'],
+        'phase': 'follow-up',
+        'prompt': follow['prompt'],
+        'build_passed': False,
+        'result': 'skipped',
+        'reason': 'initial_failed',
+        'model_calls': 0,
+        'fix_attempts': 0,
+        'tool_errors': 0,
+        'seconds': 0,
+        'files_changed': [],
+        'detail': (
+            'Not executed. Initial prompt '
+            + initial_id
+            + ' did not commit, so this row is not an iterative-edit result. '
+            + 'The server would refuse the follow-up before any model call.'
+        ),
     }
 
 
@@ -139,34 +184,88 @@ def cell(value):
     return str(value).replace('|', '/')
 
 
-def write_results(rows):
-    OUT.parent.mkdir(parents=True, exist_ok=True)
-    passed = 0
+def summary_lines(rows):
+    initial = []
+    follow = []
+    for row in rows:
+        if row['phase'] == 'initial':
+            initial.append(row)
+        elif row['phase'] == 'follow-up':
+            follow.append(row)
+    executed = []
+    skipped = []
+    for row in follow:
+        if row['result'] == 'skipped':
+            skipped.append(row)
+        else:
+            executed.append(row)
+    initial_ok = 0
+    for row in initial:
+        if row['build_passed']:
+            initial_ok += 1
+    follow_ok = 0
+    for row in executed:
+        if row['build_passed']:
+            follow_ok += 1
+    commits = 0
     for row in rows:
         if row['build_passed']:
-            passed += 1
+            commits += 1
+    return [
+        'Initial generation: ' + str(initial_ok) + ' of ' + str(len(initial)) + ' committed.',
+        'Follow-ups executed against a committed UI: '
+        + str(follow_ok)
+        + ' of '
+        + str(len(executed))
+        + ' committed.',
+        'Follow-ups skipped because the initial generation did not commit: '
+        + str(len(skipped))
+        + '. These are not iterative-edit successes and are not in the follow-up denominator.',
+        'Rows with a clean commit: '
+        + str(commits)
+        + ' of '
+        + str(len(rows))
+        + '. That total mixes new UIs and follow-ups. Use the two rates above.',
+    ]
+
+
+def write_results(rows):
+    OUT.parent.mkdir(parents=True, exist_ok=True)
     lines = [
         '# Eval results',
         '',
-        'Real run of `python -m scripts.eval` from the `server` folder.',
-        str(passed) + ' of ' + str(len(rows)) + ' prompts ended in a clean commit.',
+        'Fresh run of `python -m scripts.eval` from the `server` folder.',
+        'Each initial prompt starts from the starter project. A follow-up runs only after that prompt commits, in the same session, against the committed UI.',
+        'Passing the type check is not enough to commit: the staged project must also pass the production build and the browser smoke test.',
         '',
-        '| # | Prompt | Build passed | Model calls | Fix attempts | Seconds | Files changed |',
-        '| --- | --- | --- | --- | --- | --- | --- |',
     ]
+    lines.extend(summary_lines(rows))
+    lines.extend(
+        [
+            '',
+            '| # | Phase | Prompt | Result | Reason | Model calls | Fix attempts | Tool errors | Seconds | Files changed |',
+            '| --- | --- | --- | --- | --- | --- | --- | --- | --- | --- |',
+        ]
+    )
     for row in rows:
         files = ', '.join(row['files_changed']) if row['files_changed'] else ''
         lines.append(
             '| '
             + row['id']
             + ' | '
+            + row['phase']
+            + ' | '
             + cell(row['prompt'])
             + ' | '
-            + ('yes' if row['build_passed'] else 'no')
+            + row['result']
+            + ' | '
+            + cell(row['reason'])
             + ' | '
             + str(row['model_calls'])
             + ' | '
             + str(row['fix_attempts'])
+            + ' | '
+            + str(row['tool_errors'])
             + ' | '
             + str(row['seconds'])
             + ' | '
@@ -174,8 +273,14 @@ def write_results(rows):
             + ' |'
         )
     lines.append('')
+    for row in rows:
+        if row.get('detail'):
+            lines.append(row['id'] + ': ' + row['detail'])
+    lines.append('')
     OUT.write_text('\n'.join(lines), encoding='utf-8')
     print('Wrote ' + str(OUT))
+    for line in summary_lines(rows):
+        print(line)
 
 
 def main():
@@ -185,19 +290,24 @@ def main():
         apply_template_app()
         session = Session()
         print('RUN ' + case['id'] + ': ' + case['prompt'])
-        row = run_prompt(session, case['prompt'])
+        row = run_prompt(session, case['prompt'], 'initial')
         row['id'] = case['id']
         rows.append(row)
         print(row)
         time.sleep(PAUSE_SECONDS)
-        for follow in case['followups']:
-            print('RUN ' + follow['id'] + ': ' + follow['prompt'])
-            follow_row = run_prompt(session, follow['prompt'])
-            follow_row['id'] = follow['id']
-            rows.append(follow_row)
-            print(follow_row)
-            time.sleep(PAUSE_SECONDS)
-    order = ['1', '2', '3', '4', '5', '6', '7', '8', 'F1', 'F2', 'F3', 'F4']
+        if row['build_passed']:
+            for follow in case['followups']:
+                print('RUN ' + follow['id'] + ': ' + follow['prompt'])
+                follow_row = run_prompt(session, follow['prompt'], 'follow-up')
+                follow_row['id'] = follow['id']
+                rows.append(follow_row)
+                print(follow_row)
+                time.sleep(PAUSE_SECONDS)
+        else:
+            for follow in case['followups']:
+                print('SKIP ' + follow['id'] + ' because ' + case['id'] + ' did not commit')
+                rows.append(skipped_followup(follow, case['id']))
+    order = ['1', 'F4', '2', 'F1', '3', 'F3', '4', 'F2', '5', '6', '7', '8']
     by_id = {}
     for row in rows:
         by_id[row['id']] = row

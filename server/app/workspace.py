@@ -1,3 +1,4 @@
+import json
 import shutil
 from pathlib import Path
 
@@ -9,6 +10,17 @@ SNAPSHOTS = REPO / 'sandbox' / '.snapshots'
 MAX_SNAPSHOTS = 20
 TEMPLATE_APP = REPO / 'server' / 'template' / 'src' / 'App.tsx'
 STAGING_TSCONFIG = STAGING / 'tsconfig.json'
+# Kept outside src/ so the catalog is not a generated source file and Vite does not treat it as UI.
+SANDBOX_DESCRIPTIONS = REPO / 'sandbox' / 'file_descriptions.json'
+STAGING_DESCRIPTIONS = STAGING / 'file_descriptions.json'
+DESCRIPTION_NAME = 'file_descriptions.json'
+
+STARTER_DESCRIPTIONS = {
+    'src/App.tsx': 'Starter screen with a default export named App. Replace this when creating a new UI.',
+    'src/main.tsx': 'Locked preview entry. Mounts App and reports runtime crashes. Do not edit.',
+    'src/index.css': 'Locked Tailwind stylesheet. Do not edit.',
+    'src/vite-env.d.ts': 'Vite client types. Not a UI component.',
+}
 
 STAGING_TSCONFIG_TEXT = '''{
   "extends": "../tsconfig.json",
@@ -21,6 +33,9 @@ def ensure_staging_layout():
     STAGING.mkdir(parents=True, exist_ok=True)
     STAGING_SRC.mkdir(parents=True, exist_ok=True)
     STAGING_TSCONFIG.write_text(STAGING_TSCONFIG_TEXT, encoding='utf-8')
+    index = REPO / 'sandbox' / 'index.html'
+    if index.exists():
+        (STAGING / 'index.html').write_text(index.read_text(encoding='utf-8'), encoding='utf-8')
 
 
 def _copy_tree(src: Path, dest: Path):
@@ -32,6 +47,8 @@ def _copy_tree(src: Path, dest: Path):
 def reset_staging_from_sandbox():
     ensure_staging_layout()
     _copy_tree(SANDBOX_SRC, STAGING_SRC)
+    sync_description_file(SANDBOX_SRC, SANDBOX_DESCRIPTIONS)
+    _copy_description_file(SANDBOX_DESCRIPTIONS, STAGING_DESCRIPTIONS)
 
 
 def _snapshot_names():
@@ -59,6 +76,7 @@ def snapshot_committed():
     dest_root = SNAPSHOTS / str(number).zfill(4)
     dest_root.mkdir(parents=True, exist_ok=True)
     _copy_tree(SANDBOX_SRC, dest_root / 'src')
+    _copy_description_file(SANDBOX_DESCRIPTIONS, dest_root / DESCRIPTION_NAME)
     names = _snapshot_names()
     while len(names) > MAX_SNAPSHOTS:
         shutil.rmtree(SNAPSHOTS / names[0])
@@ -76,6 +94,7 @@ def undo_committed():
     latest = names[-1]
     saved = SNAPSHOTS / latest / 'src'
     _copy_tree(saved, SANDBOX_SRC)
+    _copy_description_file(SNAPSHOTS / latest / DESCRIPTION_NAME, SANDBOX_DESCRIPTIONS)
     shutil.rmtree(SNAPSHOTS / latest)
     reset_staging_from_sandbox()
     return read_committed_files()
@@ -83,6 +102,7 @@ def undo_committed():
 
 def commit_staging_to_sandbox():
     ensure_staging_layout()
+    sync_description_file(STAGING_SRC, STAGING_DESCRIPTIONS)
     snapshot_committed()
     staging_files = _list_src_files(STAGING_SRC)
     sandbox_files = _list_src_files(SANDBOX_SRC)
@@ -98,6 +118,7 @@ def commit_staging_to_sandbox():
             (SANDBOX_SRC / rel).unlink(missing_ok=True)
 
     _remove_empty_dirs(SANDBOX_SRC)
+    _copy_description_file(STAGING_DESCRIPTIONS, SANDBOX_DESCRIPTIONS)
 
 
 def read_committed_files():
@@ -137,5 +158,105 @@ def apply_template_app():
         shutil.rmtree(components)
     text = TEMPLATE_APP.read_text(encoding='utf-8')
     (SANDBOX_SRC / 'App.tsx').write_text(text, encoding='utf-8')
+    write_description_map(SANDBOX_DESCRIPTIONS, STARTER_DESCRIPTIONS)
     ensure_staging_layout()
     reset_staging_from_sandbox()
+
+
+def project_files(src_root):
+    found = []
+    if not src_root.exists():
+        return found
+    for path in src_root.rglob('*'):
+        if not path.is_file():
+            continue
+        if path.suffix not in ('.ts', '.tsx', '.css'):
+            continue
+        if path.name == DESCRIPTION_NAME:
+            continue
+        rel = 'src/' + str(path.relative_to(src_root)).replace('\\', '/')
+        if '..' in rel.split('/'):
+            continue
+        found.append(rel)
+    found.sort()
+    return found
+
+
+def read_description_map(path):
+    if not path.exists():
+        return {}
+    try:
+        data = json.loads(path.read_text(encoding='utf-8'))
+    except (OSError, json.JSONDecodeError, UnicodeError):
+        return {}
+    if not isinstance(data, dict):
+        return {}
+    clean = {}
+    for key, value in data.items():
+        if not isinstance(key, str) or not isinstance(value, str):
+            continue
+        name = key.replace('\\', '/').strip()
+        if not name.startswith('src/') or '..' in name.split('/'):
+            continue
+        if name.endswith('/' + DESCRIPTION_NAME) or name == 'src/' + DESCRIPTION_NAME:
+            continue
+        text = ' '.join(value.split())
+        if text == '':
+            continue
+        clean[name] = text
+    return clean
+
+
+def write_description_map(path, data):
+    path.parent.mkdir(parents=True, exist_ok=True)
+    ordered = {}
+    for key in sorted(data):
+        ordered[key] = data[key]
+    path.write_text(json.dumps(ordered, indent=2) + '\n', encoding='utf-8')
+
+
+def sync_description_file(src_root, desc_path):
+    existing = set(project_files(src_root))
+    current = read_description_map(desc_path)
+    cleaned = {}
+    for name in sorted(existing):
+        value = current.get(name, '')
+        if value:
+            cleaned[name] = value
+    write_description_map(desc_path, cleaned)
+    return cleaned
+
+
+def catalog_text(src_root, desc_path):
+    files = project_files(src_root)
+    descriptions = sync_description_file(src_root, desc_path)
+    if not files:
+        return 'FILE CATALOG\n(no project files)'
+    lines = ['FILE CATALOG']
+    for rel in files:
+        desc = descriptions.get(rel) or '(no description yet)'
+        lines.append('- ' + rel + ' — ' + desc)
+    return '\n'.join(lines)
+
+
+def set_staged_description(key, text):
+    cleaned = sync_description_file(STAGING_SRC, STAGING_DESCRIPTIONS)
+    if key not in project_files(STAGING_SRC):
+        return
+    cleaned[key] = text
+    write_description_map(STAGING_DESCRIPTIONS, cleaned)
+
+
+def remove_staged_description(key):
+    cleaned = sync_description_file(STAGING_SRC, STAGING_DESCRIPTIONS)
+    if key in cleaned:
+        del cleaned[key]
+        write_description_map(STAGING_DESCRIPTIONS, cleaned)
+
+
+def _copy_description_file(src, dest):
+    dest.parent.mkdir(parents=True, exist_ok=True)
+    if src.exists():
+        dest.write_text(src.read_text(encoding='utf-8'), encoding='utf-8')
+    else:
+        dest.write_text('{}\n', encoding='utf-8')
