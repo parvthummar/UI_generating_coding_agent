@@ -69,16 +69,6 @@ async function bodyText(page) {
   return page.locator('body').innerText();
 }
 
-async function listItems(page) {
-  const items = page.locator('li, [role="listitem"]');
-  const count = await items.count();
-  const texts = [];
-  for (let index = 0; index < count; index += 1) {
-    texts.push((await items.nth(index).innerText()).trim());
-  }
-  return texts;
-}
-
 function remainingCount(text) {
   const patterns = [
     /(\d+)\s*(?:tasks?|items?)?\s*(?:left|remaining)/i,
@@ -98,22 +88,18 @@ async function todo(page) {
     report('BEHAVE_INCONCLUSIVE', 'No text field was found, so adding a task could not be checked.');
     return;
   }
-  const beforeItems = await listItems(page);
-  const beforeCount = remainingCount(await bodyText(page));
+  // Tasks may be rendered as list items or plain divs, so look for the visible text, not a tag.
+  const beforeText = await bodyText(page);
+  const beforeCount = remainingCount(beforeText);
   await input.fill('Buy milk');
   const add = page.getByRole('button', { name: /add|create|save|submit/i }).first();
   if ((await add.count()) > 0) await add.click();
   else await input.press('Enter');
   await page.waitForTimeout(300);
-  const afterItems = await listItems(page);
-  const afterCount = remainingCount(await bodyText(page));
-  const listed = afterItems.some((item) => item.includes('Buy milk'));
-  if (!listed) {
-    report('BEHAVE_FAIL', 'The new task did not appear in the task list.');
-    return;
-  }
-  if (afterItems.length !== beforeItems.length + 1) {
-    report('BEHAVE_FAIL', 'The task list did not grow by one item.');
+  const afterText = await bodyText(page);
+  const afterCount = remainingCount(afterText);
+  if (beforeText.includes('Buy milk') || !afterText.includes('Buy milk')) {
+    report('BEHAVE_FAIL', 'The new task did not appear on the page.');
     return;
   }
   if (beforeCount == null || afterCount == null) {
@@ -177,88 +163,85 @@ async function pomodoro(page) {
   report('BEHAVE_PASS', 'The countdown advanced, pause stopped it, and reset restored ' + startedAt + ' seconds.');
 }
 
-async function boardColumns(page) {
-  return page.evaluate(() => {
-    const heads = Array.from(document.querySelectorAll('h1, h2, h3, h4'));
-    return heads.map((head) => {
-      let box = head.parentElement;
-      while (box && box.parentElement) {
-        const parentHeads = box.parentElement.querySelectorAll('h1, h2, h3, h4');
-        if (parentHeads.length > 1) break;
-        box = box.parentElement;
+const MOVE_NAME = /move|→|←|›|‹|»|«|right|left|next|prev|back|forward/i;
+const FORWARD_NAME = /move|→|›|»|right|next|forward/i;
+
+// Center x of the card whose text, without its buttons, is exactly this label.
+async function cardX(page, label) {
+  return page.evaluate((wanted) => {
+    function cleanText(el) {
+      const copy = el.cloneNode(true);
+      copy.querySelectorAll('button').forEach((button) => button.remove());
+      return (copy.textContent || '').replace(/\s+/g, ' ').trim();
+    }
+    const all = Array.from(document.querySelectorAll('body *'));
+    for (let index = all.length - 1; index >= 0; index -= 1) {
+      if (cleanText(all[index]) === wanted) {
+        const box = all[index].getBoundingClientRect();
+        return box.left + box.width / 2;
       }
-      const title = (head.textContent || '').trim();
-      const cards = [];
-      const items = box ? box.querySelectorAll('li, [role="listitem"]') : [];
-      items.forEach((item) => {
-        const copy = item.cloneNode(true);
-        copy.querySelectorAll('button').forEach((button) => button.remove());
-        const text = (copy.textContent || '').replace(/\s+/g, ' ').trim();
-        if (text && text !== title) cards.push(text);
-      });
-      return { title, cards };
-    });
-  });
+    }
+    return null;
+  }, label);
 }
 
-function cardColumn(columns, card) {
-  const hits = [];
-  columns.forEach((column, index) => {
-    if (column.cards.some((line) => line.includes(card))) hits.push(index);
+// The text of the card that holds this button: its nearest ancestor with text outside buttons.
+async function cardLabel(button) {
+  return button.evaluate((btn) => {
+    let box = btn.parentElement;
+    while (box && box !== document.body) {
+      const copy = box.cloneNode(true);
+      copy.querySelectorAll('button').forEach((inner) => inner.remove());
+      const text = (copy.textContent || '').replace(/\s+/g, ' ').trim();
+      if (text) return text;
+      box = box.parentElement;
+    }
+    return '';
   });
-  return hits;
 }
 
 async function kanban(page) {
-  const before = await boardColumns(page);
-  if (before.length < 2) {
-    report('BEHAVE_INCONCLUSIVE', 'Fewer than two columns were found.');
+  const all = page.getByRole('button', { name: MOVE_NAME });
+  const count = await all.count();
+  if (count === 0) {
+    report('BEHAVE_INCONCLUSIVE', 'No move control was found.');
     return;
   }
-  let card = '';
-  let from = -1;
-  for (const column of before) {
-    for (const line of column.cards) {
-      const hits = cardColumn(before, line);
-      if (hits.length === 1) {
-        card = line;
-        from = hits[0];
-        break;
-      }
+  const order = [];
+  for (let index = 0; index < count; index += 1) {
+    const name = (await all.nth(index).innerText()) + ' ' + ((await all.nth(index).getAttribute('aria-label')) || '');
+    if (FORWARD_NAME.test(name)) order.push(index);
+  }
+  for (let index = 0; index < count; index += 1) {
+    if (!order.includes(index)) order.push(index);
+  }
+  let tried = 0;
+  let lastLabel = '';
+  for (const index of order.slice(0, 3)) {
+    const button = all.nth(index);
+    const label = await cardLabel(button);
+    if (!label || label === lastLabel) continue;
+    const before = await cardX(page, label);
+    if (before == null) continue;
+    tried += 1;
+    lastLabel = label;
+    await button.click();
+    await page.waitForTimeout(300);
+    const after = await cardX(page, label);
+    if (after == null) {
+      report('BEHAVE_FAIL', 'The card "' + label + '" disappeared instead of moving to another column.');
+      return;
     }
-    if (card) break;
+    if (Math.abs(after - before) > 40) {
+      report('BEHAVE_PASS', 'The card "' + label + '" moved to another column.');
+      return;
+    }
   }
-  if (!card) {
-    report('BEHAVE_INCONCLUSIVE', 'No card could be tied to a single column.');
+  if (tried === 0) {
+    report('BEHAVE_INCONCLUSIVE', 'No card could be tied to a move control.');
     return;
   }
-  const move = page
-    .locator('h1, h2, h3, h4')
-    .filter({ hasText: before[from].title })
-    .locator('xpath=ancestor::*[.//button][1]')
-    .getByRole('button', { name: /move|→|‹|›|left|right|next|back/i })
-    .first();
-  if ((await move.count()) === 0) {
-    report('BEHAVE_INCONCLUSIVE', 'No move control was found in the card column.');
-    return;
-  }
-  await move.click();
-  await page.waitForTimeout(300);
-  const after = await boardColumns(page);
-  const now = cardColumn(after, card);
-  if (now.length === 0) {
-    report('BEHAVE_FAIL', 'The card disappeared instead of moving to another column.');
-    return;
-  }
-  if (now.length === 1 && now[0] === from) {
-    report('BEHAVE_FAIL', 'The card stayed in the same column.');
-    return;
-  }
-  if (!now.some((index) => index !== from)) {
-    report('BEHAVE_FAIL', 'The card was not found in a different column.');
-    return;
-  }
-  report('BEHAVE_PASS', 'The card moved from ' + before[from].title + ' to another column.');
+  report('BEHAVE_FAIL', 'The card stayed in the same column after its move control was used.');
 }
 
 function temperatureReading(text) {

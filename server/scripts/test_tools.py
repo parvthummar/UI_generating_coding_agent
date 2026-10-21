@@ -489,6 +489,10 @@ def check_behavior():
     )
     behavior_case('adding a task increases the remaining count', todo.replace('COUNT', '{items.length}'), 'todo', 'BEHAVE_PASS', 'from 2 to 3')
     behavior_case('a stale remaining count fails', todo.replace('COUNT', '2'), 'todo', 'BEHAVE_FAIL')
+    div_todo = todo.replace('COUNT', '{items.length}').replace('<ul>', '<div>').replace('</ul>', '</div>').replace('<li key', '<div key').replace('</li>', '</div>')
+    behavior_case('tasks rendered as divs still count as added', div_todo, 'todo', 'BEHAVE_PASS', 'from 2 to 3')
+    no_add = todo.replace('COUNT', '{items.length}').replace('setItems(items.concat(text)); ', '')
+    behavior_case('a task that never appears fails', no_add, 'todo', 'BEHAVE_FAIL', 'did not appear')
 
     timer = (
         "import { useEffect, useState } from 'react';\n"
@@ -519,14 +523,18 @@ def check_behavior():
         + "  const [cards, setCards] = useState({ todo: ['Paint'], done: ['Ship'] });\n"
         + '  function move() { setCards({ todo: [], done: ["Ship", "Paint"] }); }\n'
         + '  return (\n'
-        + '    <div>\n'
-        + '      <section><h2>Todo</h2><ul>{cards.todo.map((card) => <li key={card}>{card}<button onClick={move}>Move</button></li>)}</ul></section>\n'
-        + '      <section><h2>Done</h2><ul>{cards.done.map((card) => <li key={card}>{card}</li>)}</ul></section>\n'
+        + '    <div className="flex gap-8">\n'
+        + '      <section className="w-48"><h2>Todo</h2><ul>{cards.todo.map((card) => <li key={card}>{card}<button onClick={move}>Move</button></li>)}</ul></section>\n'
+        + '      <section className="w-48"><h2>Done</h2><ul>{cards.done.map((card) => <li key={card}>{card}</li>)}</ul></section>\n'
         + '    </div>\n'
         + '  );\n'
         + '}\n'
     )
     behavior_case('a card move is detected across columns', board, 'kanban', 'BEHAVE_PASS', 'another column')
+    div_board = board.replace('<ul>', '<div>').replace('</ul>', '</div>').replace('<li key={card}>{card}', '<div key={card}><h3>{card}</h3>').replace('</li>', '</div>')
+    behavior_case('cards rendered as divs with heading titles are detected', div_board, 'kanban', 'BEHAVE_PASS', 'another column')
+    stuck_board = board.replace('function move() { setCards({ todo: [], done: ["Ship", "Paint"] }); }', 'function move() {}')
+    behavior_case('a move button that does nothing fails', stuck_board, 'kanban', 'BEHAVE_FAIL', 'same column')
 
     weather = (
         "import { useState } from 'react';\n"

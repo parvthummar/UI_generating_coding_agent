@@ -11,7 +11,7 @@ Project rules:
 New UI:
 - Plan briefly, then create every file in ONE response with write_file: the components in src/components/ first, then src/App.tsx last.
 - Keep src/App.tsx short: layout and shared state, rendering the components. Keep each file under about 150 lines.
-- The user's request is the spec. Make it look polished and make every control work.
+- The user's request is the spec. Implement every feature it names, for example add, complete, delete and filter each need a working control. Make it look polished.
 
 Follow-up requests:
 - The user message contains the current project files. That is exactly what the preview shows now.
