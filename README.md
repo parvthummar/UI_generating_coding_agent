@@ -102,11 +102,11 @@ python -m scripts.eval
 
 The table is in [eval/results.md](eval/results.md). The latest run with `gpt-4o-mini`:
 
-- New UIs: 9 of 9 committed. Follow-ups: 4 of 4 committed, each keeping 99 to 100 percent of the previous lines.
-- Interaction checks: 4 of 4 passed (todo count, Pomodoro start/pause/reset, Kanban move, temperature unit).
-- Self-correction: in several rows the type check caught the model's own errors mid-build (a made-up lucide icon, a missing import, `NodeJS` types, `date-fns`), and the model fixed them before the commit.
+- New UIs: 9 of 9 committed. Follow-ups: 4 of 4 committed. Each follow-up kept 99 to 100 percent of the previous lines, so they were edits, not rewrites. For example, "make the message field optional" changed only `ContactForm.tsx`.
+- Self-correction: 5 of 13 rows committed only after the agent fixed its own type errors. For example, E1 imported `date-fns`, got "Cannot find module 'date-fns'", and replaced it with plain code. The dark-mode follow-up needed 5 such steps.
+- Interaction checks: todo count, Pomodoro start/pause/reset, and temperature unit passed. Kanban was inconclusive because the checker found no labeled move button.
 
-Runs are not deterministic. Over the repeated runs while fixing the loop, an occasional follow-up or Kanban generation still rolled back, and the checker once caught a generated board that deleted a card when moving it left from the first column. Before these fixes the same eval committed 3 of 12 rows.
+Runs are not deterministic. In the runs made while fixing the loop, an occasional follow-up still rolled back. The interaction check also caught generated Kanban boards whose move buttons did nothing or deleted the card. Those committed, because interaction checks are not part of the commit gate. Before these fixes the same eval committed 3 of 12 rows.
 
 ## Known limits
 
