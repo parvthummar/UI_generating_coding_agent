@@ -16,8 +16,9 @@ type RuntimeError = {
 
 let nextId = 1;
 
-function statusText(data: { phase?: string; step?: number; attempt?: number }) {
+function statusText(data: { phase?: string; step?: number; attempt?: number; count?: number }) {
   if (data.phase === 'thinking') return 'Thinking (step ' + data.step + ')';
+  if (data.phase === 'type_errors') return 'Type check found ' + data.count + ' error(s), sending them back to the agent';
   if (data.phase === 'validating') return 'Checking types, build and render';
   if (data.phase === 'fixing_error') return 'Fixing an error (attempt ' + data.attempt + ' of 3)';
   if (data.phase === 'waiting_for_rate_limit') return 'Waiting for the rate limit';

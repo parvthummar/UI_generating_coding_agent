@@ -27,6 +27,11 @@ DIAG_RE = re.compile(r'(src/[A-Za-z0-9_./-]+\.tsx?)\((\d+),(\d+)\):\s+error\s+(T
 PATH_RE = re.compile(r'src/(?:[A-Za-z0-9_.\-]+/)*[A-Za-z0-9_.\-]+\.tsx?')
 MISSING_RE = re.compile(r"(src/[A-Za-z0-9_./-]+\.tsx?)\(\d+,\d+\):\s+error\s+TS2304:\s+Cannot find name '([A-Z][A-Za-z0-9_]*)'")
 FAILED_NOTE = 'FAILED and rolled back. No files were committed, the preview does not include this request.'
+NO_TOOLS_NOTE = (
+    'You did not call any tools, so nothing changed in the preview. '
+    'If the request needs code changes, make them now with the tools. '
+    'If it is only a question, give your answer again.'
+)
 SAME_ERROR_NOTE = 'This is the same error as before. Your last change did not fix it, try a different approach.'
 
 
@@ -193,6 +198,7 @@ def _run_turn(session, user_text, state):
     fix_retries = 0
     last_errors = ''
     interim_seen = []
+    nudged = False
 
     for step in range(1, MAX_STEPS + 1):
         yield sse('status', {'phase': 'thinking', 'step': step})
@@ -206,6 +212,11 @@ def _run_turn(session, user_text, state):
 
         if len(reply['tool_calls']) == 0:
             # The model says it is finished. This is the commit gate.
+            if len(changed) == 0 and not nudged:
+                # Models sometimes describe a plan and stop. Ask once before treating it as an answer.
+                nudged = True
+                messages.append({'role': 'user', 'content': NO_TOOLS_NOTE})
+                continue
             if len(changed) == 0:
                 session.add_turn(user_text, finish_note(reply['content']), [])
                 yield sse('assistant_message', {'text': finish_note(reply['content'])})
@@ -247,6 +258,7 @@ def _run_turn(session, user_text, state):
             errors = run_tsc()
             if errors:
                 print('type check: ' + errors[:300].replace(NL, ' | '))
+                yield sse('status', {'phase': 'type_errors', 'count': len(DIAG_RE.findall(errors.replace('\\', '/')))})
                 # A model that toggles between two broken versions repeats an earlier error, not the last one.
                 last_tool_message['content'] += interim_text(errors, errors in interim_seen)
                 interim_seen.append(errors)

@@ -298,6 +298,7 @@ def check_agent_loop():
             break
     check('interim errors are shown to the model', 'Hero' in first_tool and 'Type check after this step' in first_tool, first_tool[:300])
     check('interim errors do not use a correction round', 'fixing_error' not in events, events[:300])
+    check('interim errors are streamed to the chat', '"phase": "type_errors"' in events)
     check('the finished UI commits', 'files_updated' in events and (workspace.SANDBOX_SRC / 'components' / 'Hero.tsx').exists())
     check('the commit event names the changed files', '"changed": ["src/App.tsx", "src/components/Hero.tsx"]' in events, events[-400:])
 
@@ -391,9 +392,10 @@ def check_agent_loop():
     check('rollback clears the staged file', not (workspace.STAGING_SRC / 'components' / 'Boom.tsx').exists())
     check('history says the turn failed', 'FAILED and rolled back' in session.history[-1]['content'])
     seen = []
-    with Patch(scripted_llm([text_reply('The last change was rolled back, nothing to edit yet.')], seen), lambda: ''):
+    replies = [text_reply('Nothing to edit yet.'), text_reply('The last change was rolled back, nothing to edit yet.')]
+    with Patch(scripted_llm(replies, seen), lambda: ''):
         events = events_of(run_turn(session, 'Make it blue'))
-    check('a request after a rollback still reaches the model', 'assistant_message' in events and len(seen) == 1)
+    check('a request after a rollback still reaches the model', 'assistant_message' in events and len(seen) == 2)
     check('the model sees the failed turn in its history', 'FAILED and rolled back' in str(seen[0]))
 
     # Running out of steps with a finished project still gets one full check.
@@ -416,9 +418,22 @@ def check_agent_loop():
 
     # A plain question changes nothing and commits nothing.
     workspace.apply_template_app()
-    with Patch(scripted_llm([text_reply('It is a blank page.')], []), lambda: 'should not run'):
+    seen = []
+    with Patch(scripted_llm([text_reply('It is a blank page.'), text_reply('It is a blank page.')], seen), lambda: 'should not run'):
         events = events_of(run_turn(Session(), 'What is on screen?'))
     check('a turn without edits does not validate or commit', 'files_updated' not in events and 'validating' not in events)
+    check('a reply without tools is questioned only once', len(seen) == 2 and '"text": "It is a blank page."' in events)
+
+    # A model that only describes its plan is asked to act on it.
+    workspace.apply_template_app()
+    replies = [
+        text_reply('I will create a Hero component and render it.'),
+        tool_reply([write_call('App.tsx', component('App', 'Hero'))]),
+        text_reply('Added a hero.'),
+    ]
+    with Patch(scripted_llm(replies, []), lambda: ''):
+        events = events_of(run_turn(Session(), 'Build a hero'))
+    check('a plan without tool calls is followed by the actual change', 'files_updated' in events)
 
 
 def check_validation():
@@ -598,6 +613,8 @@ def check_behavior():
         + '}\n'
     )
     behavior_case('a left move on the first column does not hide a working right move', two_way, 'kanban', 'BEHAVE_PASS', 'another column')
+    badge = two_way.replace('<h3>{card}</h3>', '<h3>{card}</h3><span>{i === 0 ? "Open" : "Closed"}</span>')
+    behavior_case('a card whose badge changes with its column is still found', badge, 'kanban', 'BEHAVE_PASS', 'another column')
     stuck_board = board.replace('function move() { setCards({ todo: [], done: ["Ship", "Paint"] }); }', 'function move() {}')
     behavior_case('a move button that does nothing fails', stuck_board, 'kanban', 'BEHAVE_FAIL', 'same column')
 

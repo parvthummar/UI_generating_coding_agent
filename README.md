@@ -1,6 +1,6 @@
 # UI Agent
 
-Chat on the left, a live React preview on the right. You describe a UI, an agent writes the code, and the preview updates only after the staged project passes TypeScript, a production build, and a browser smoke test. A clean type check is not treated as proof that the UI runs.
+Chat on the left, a live React preview on the right. You describe a UI, an agent writes the code, and the preview updates only after the staged project passes TypeScript, a production build, and a browser smoke test. Follow-ups edit the existing code with small search-and-replace edits instead of rewriting it.
 
 Demo: not recorded in this repo. A 3 to 4 minute walkthrough is listed under [Demo script](#demo-script).
 
@@ -54,70 +54,73 @@ Router, editor, debugger, and reviewer are not separate agents. They are modes o
 
 One turn:
 
-1. Copy `sandbox/src` to `sandbox/.staging/src`, and copy `sandbox/file_descriptions.json` with it. That JSON file lives outside `src/`, so it is not a generated source file.
-2. Send the system prompt, a short history, and a file catalog of the committed UI. Each line is a path and a one-sentence description. Source code is not included.
-3. The model chooses tools. The server runs them on the staging copy. At most 12 model calls to build the change, and at most 4 tool calls per step. `read_file` is required before changing a file that already exists. After a step that changed files, `tsc` reports errors immediately. That hint does not use up a correction round. The same TypeScript error on two steps in a row starts a correction round instead of letting the model repeat the edit. If the 12 build calls are used while files have changed, the server asks the model to stop and then runs validation once. That is one extra model call, not an open-ended extension.
-4. When the model stops and files changed, or when that final check runs, the server validates the staged tree: `tsc --noEmit` on `sandbox/.staging`, then `vite build` with `sandbox/vite.staging.config.ts` (root `sandbox/.staging`, not the committed `sandbox/src`), then a Playwright smoke test of that build. When TypeScript says a name is missing, the correction text also lists matching exports in other staged files, or says to declare a local name in the file that uses it. It gets at most 3 correction rounds. Each failed check allows 4 more model calls, so the total is at most 24. A failure on the last build step can still be corrected.
-5. When that full check is clean, staging source and descriptions are copied onto the sandbox. The preview refreshes. The previous committed source and descriptions are stored as a snapshot first.
-6. If the step limit or the fix limit is hit, staging is dropped. The preview stays as it was. The chat says the turn was rolled back. Follow-ups stay paused until you retry that request or explicitly send a new UI, so a later message cannot edit the old preview as if the failed UI had been created.
-7. Undo restores the previous snapshot, including descriptions. New session clears the snapshots and rewrites the starter descriptions.
-
-The catalog is how the model picks files. `read_file` loads the source it needs. There is no `list_files` or `search_code` tool. Files with no description yet still appear, labeled `(no description yet)`. Descriptions for deleted or missing files are dropped. A corrupt descriptions file does not hide the project files.
+1. Copy `sandbox/src` to `sandbox/.staging/src`. The agent only ever writes to the staging copy.
+2. Send the system prompt, the last 10 turns of history (each request plus a short note of what changed, or that it failed), and the request with the current source of every project file attached. If the files exceed 30,000 characters, the rest are listed by path and description and the model uses `read_file`. When the project is still the blank starter, the message says so.
+3. The model chooses tools. The server runs every tool call of a step in order on the staging copy (up to 12 per step). After a step that changed files, `tsc` runs and any errors go back to the model with the offending source lines quoted. If a component exists but is not imported, the error comes with the exact import line. These mid-build errors are feedback, not failures: a half-built UI that imports a component written one step later is normal. If an error repeats one seen earlier in the turn, the model also gets the current text of the files involved, which breaks edit loops.
+4. When the model stops calling tools, the server validates the staged tree: `tsc --noEmit`, then `vite build` with `sandbox/vite.staging.config.ts`, then a Playwright smoke test of that build. Clean means commit. A failure goes back to the model with the error text, the failing lines, and the current text of the cited files. At most 3 of these correction rounds, and at most 16 model calls in total. If the step budget runs out with a clean project, it still gets one final check.
+5. Commit copies the staged source onto the sandbox. The preview refreshes, the code view updates from the same event, and the files changed in this turn are marked in the code view.
+6. If the fix limit or step limit is hit, staging is dropped, the preview stays as it was, and the chat says the turn was rolled back. The history records the failure, so the next request knows that change never happened. The chat stays usable.
 
 Tools:
 
 | Tool | What it does |
 | --- | --- |
 | `read_file` | Returns the text of one file under `src/` |
-| `write_file` | Creates a file, or replaces one of 60 lines or fewer. Requires `path`, `content`, and a one-sentence `description` |
-| `edit_file` | Replaces one exact `old_str`. Zero matches or more than one match is an error and does not change the file. Optional `description` updates the catalog when the file's job changes |
-| `delete_file` | Deletes a file and its description. Refuses `App.tsx` |
+| `write_file` | Creates a file or replaces it. A file that was already in the preview before this request and has more than 60 lines is refused, so follow-ups must use `edit_file`. Files created during the current request can be rewritten while the model fixes them |
+| `edit_file` | Replaces one exact `old_str`. Zero or multiple matches is an error that includes the current file text. If the exact text is not found, a match that ignores leading and trailing spaces on each line is accepted when it is unique, which absorbs indentation drift. An edit that changes nothing is an error. Editing the blank starter `App.tsx` is refused, it must be replaced |
+| `delete_file` | Deletes a file. Refuses `App.tsx` |
 
-`main.tsx` and `index.css` are locked. Paths must stay inside `sandbox/.staging/src`. Only `.ts` and `.tsx` files can be written. An edit of one file does not delete other files unless the model calls `delete_file`.
+`main.tsx` and `index.css` are locked. Paths must stay inside `sandbox/.staging/src`. Only `.ts` and `.tsx` files can be written. An edit of one file does not touch other files.
 
-There is no tool for the compiler, the build, or the smoke test. The server runs them, so the model cannot skip the check. The smoke test confirms that the staged UI mounts and that the error boundary or an uncaught exception did not fire. It does not click through the page. Harmless warnings and blocked external network requests are not failures. The live preview on port 5174 keeps serving the last committed `sandbox/src` while this check runs. After a commit, the eval script can run a separate Playwright check that clicks through a todo, timer, board, or temperature control. That check does not decide whether the turn commits, and a successful mount is not an interaction pass.
+There is no tool for the compiler, the build, or the smoke test. The server runs them, so the model cannot skip the check. The smoke test confirms that the staged UI mounts and that the error boundary or an uncaught exception did not fire. It does not click through the page. Clicks that crash later are reported by the preview, and **Ask the agent to fix this** sends the error and stack through the same commit gate.
 
 ## Design decisions and trade-offs
 
-- One loop with 4 tools instead of several AI agents: fewer model calls, easier to debug, keeps API cost down. Split only if evaluation shows a benefit.
-- A Python server with Node only for the preview and the compiler: the server is written in the language I move fastest in, at the cost of two runtimes to install.
+- One loop with 4 tools instead of several AI agents: fewer model calls, easier to debug, keeps API cost down.
+- The current source goes into every request: the model edits what it can see, so it does not spend steps on `read_file` or guess at `old_str`. That costs tokens, so it is capped at 30,000 characters, after which files are listed by description and read on demand. An earlier version sent only a file catalog and required `read_file` before every edit. In the eval that gate rejected the very first write of every new UI and caused most rollbacks.
+- Mid-build type errors are feedback, final-check failures are corrections: the loop used to count a repeated intermediate error as a correction round, so a UI still being written used up its 3 rounds before it was finished. Now only a failed final check counts.
+- The 60-line rewrite limit applies to files the user already sees: it keeps follow-ups targeted, but the model can still rewrite a file it created minutes ago in the same request.
+- A Python server with Node only for the preview and the checks: the server is written in the language I move fastest in, at the cost of two runtimes to install.
 - A local Vite sandbox instead of a cloud sandbox: free and fast hot reload, but only one session at a time and no arbitrary packages.
-- TypeScript, then a production build, then a headless smoke test, all against the staged copy: a type check alone used to commit UIs that crashed on load. The smoke test only covers the initial mount, so a button can still throw later. The preview reports that crash, and **Ask the agent to fix this** sends the error and stack through the same commit gate.
+- TypeScript, then a production build, then a headless smoke test, all against the staged copy: a type check alone used to commit UIs that crashed on load.
 - Search-and-replace edits instead of diffs: models handle exact strings better than line-numbered patches. Ambiguous matches are rejected instead of editing the wrong copy.
-- Fixed package list: removes made-up imports, limits what can be built. The preview already has react, react-dom, lucide-react, recharts, framer-motion, clsx, tailwind-merge, and Tailwind.
-- In-memory session: no database needed, history is lost on restart. Source snapshots and their descriptions for undo live on disk until a new session.
-- A path-and-description catalog instead of pasting every file: the model selects relevant files, then calls `read_file`. That stays small when the project grows, at the cost of an extra read before each edit. Descriptions are stored in `file_descriptions.json` next to `src/`, not inside it.
+- Fixed package list: removes made-up imports, limits what can be built. The preview has react, react-dom, lucide-react, recharts, framer-motion, clsx, tailwind-merge, and Tailwind.
+- In-memory session: no database needed, history is lost on restart. Undo snapshots live on disk until a new session.
 
 ## Eval results
 
-The script is `server/scripts/eval.py`. From the `server` folder, with the virtual environment active:
+From the `server` folder, with the virtual environment active:
 
 ```bash
 python -m scripts.test_tools
 python -m scripts.eval
 ```
 
-`scripts.eval` resets the sandbox before each new UI. It runs that prompt's follow-up in the same session only if the initial generation committed, so the follow-up edits the UI that was just committed. If the initial generation rolls back, the follow-up is recorded as skipped and is not counted as an iterative-edit success or failure. A skipped follow-up is the same situation the server handles with `followup_blocked`: no model call, and the starter project is left alone. The script waits 5 seconds between model turns. It records tool errors, fix attempts, render outcome, and whether a rollback was a compiler failure, a build failure, a runtime failure, or the step limit. For the todo follow-up, Pomodoro, Kanban, and weather prompts, a committed UI then gets a separate browser interaction check.
+`scripts.test_tools` needs no API key. It covers the tools, the path jail, commit and rollback, the real compiler, build and smoke test, and scripted agent turns that replay the failure modes seen in earlier evals: a first write to the starter, a UI whose first step imports components written later, eight tool calls in one step, rewriting a broken file created in the same turn, a model toggling between two broken versions, a follow-up that must leave other files byte-for-byte unchanged, and a request right after a rollback. It also checks the browser interaction checker against working and deliberately broken fixtures.
 
-The table is in [eval/results.md](eval/results.md). Read the rates there, not a single "N of 12". Initial generation and executed follow-ups have different denominators. A row that was skipped because the initial prompt failed is not part of the follow-up rate. A committed row passed the initial render. It is not automatically a functional-interaction pass.
+`scripts.eval` calls the model. It resets the sandbox before each new UI and runs that prompt's follow-up in the same session against the committed UI. It records model calls, type-error steps, fix attempts, tool errors, and time. For follow-ups it records which files changed and the share of the previous lines that are still there, so a full rewrite would show up as a low number. For the todo follow-up, Pomodoro, Kanban, and weather prompts, a committed UI then gets a Playwright check that types, clicks, and reads the page. That check does not decide whether a turn commits. E1 asks for `date-fns`, which is not installed, to show self-correction.
 
-The file is a fresh run on 2026-10-21 with `gpt-4o-mini`. Every commit in that run passed TypeScript, the staged production build, and the browser smoke test.
+The table is in [eval/results.md](eval/results.md). The latest run with `gpt-4o-mini`:
 
-Initial generation: 2 of 8 committed (landing page and weather). Follow-ups executed against a committed UI: 1 of 1 committed (the landing-page follow-up). Follow-ups skipped because the initial generation failed: 3. Rows with a clean commit: 3 of 12. That 3 of 12 mixes new UIs and follow-ups, so it is not the iterative-edit score. Initial-render validation passed for those 3 committed rows. The only functional check that ran was weather, and it passed because the temperature unit or value changed. Todo, Pomodoro, and Kanban did not commit, so their interaction checks did not run. Step-limit rollbacks: 0. Five rows used all 3 compiler corrections and still rolled back, including the contact form (`TS1128` in `ContactForm.tsx`) and the finance dashboard (two declarations of `App`). Pomodoro failed because `./components/PomodoroTimer` has no exported member `PomodoroTimer`. Kanban stopped with `Cannot find name 'KanbanBoard'` after 2 correction rounds. Those rollbacks left the previous preview in place.
+- New UIs: 9 of 9 committed. Follow-ups: 4 of 4 committed, each keeping 99 to 100 percent of the previous lines.
+- Interaction checks: 4 of 4 passed (todo count, Pomodoro start/pause/reset, Kanban move, temperature unit).
+- Self-correction: in several rows the type check caught the model's own errors mid-build (a made-up lucide icon, a missing import, `NodeJS` types, `date-fns`), and the model fixed them before the commit.
+
+Runs are not deterministic. Over the repeated runs while fixing the loop, an occasional follow-up or Kanban generation still rolled back, and the checker once caught a generated board that deleted a card when moving it left from the first column. Before these fixes the same eval committed 3 of 12 rows.
 
 ## Known limits
 
-Single user and single session. The preview's network policy is browser CSP, not a dedicated sandbox service, and the iframe is not an operating-system sandbox. The commit copies files one by one, so the preview may flash an in-between state for a moment. Smaller models sometimes ignore the package list. Complex interactions such as drag and drop may fail within 3 fix attempts. The smoke test checks the first render of the staged build, not every click. Undo restores one committed snapshot at a time, including file descriptions, and is cleared by New session. API keys stay in `.env` and are not written into prompts, tool results, or the descriptions file by the server.
+Single user and single session. The preview's network policy is browser CSP, not a dedicated sandbox service, and the iframe is not an operating-system sandbox. The commit copies files one by one, so the preview may flash an in-between state for a moment. Smaller models sometimes ignore the package list or skip a requested feature. The smoke test checks the first render of the staged build, not every click, and the interaction checks only run in the eval. A completely different UI in the same session has to be built through edits once `App.tsx` is over 60 lines, so **New session** is the clean way to start over. Undo restores one committed snapshot at a time and is cleared by New session. API keys stay in `.env` and are not written into prompts or tool results.
 
 ## What I would build next
 
-Per-session sandboxes, a hosted sandbox service if the preview needs stronger isolation than browser CSP, running the sandbox in the browser with a tool like Sandpack so it can be hosted, a screenshot step so the model can see its own output, and a parallel eval run.
+Per-session sandboxes, running the interaction checks as part of the commit gate for apps whose kind is known, a screenshot step so the model can see its own output, running the sandbox in the browser with a tool like Sandpack so it can be hosted, and a parallel eval run.
 
 ## Demo script
 
 1. Create a UI, for example the finance dashboard.
-2. Send a follow-up, for example a dark mode toggle, and show in the code view that only a few lines changed.
-3. Ask to use the `date-fns` library to show relative dates. That package is not installed. The compiler reports a missing module, the log shows a retry, and the agent replaces it with plain code.
+2. Send a follow-up, for example a dark mode toggle. In the code view, the changed files are marked, and only a few lines changed.
+3. Ask for an activity feed that uses the `date-fns` library. That package is not installed. The chat shows the type check reporting the missing module, and the agent replaces it with plain code before the commit.
 4. Optionally click a control that crashes the preview, then use **Ask the agent to fix this**.
 
 ## Checks

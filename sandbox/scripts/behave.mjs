@@ -168,7 +168,7 @@ async function pomodoro(page) {
   report('BEHAVE_PASS', 'The countdown advanced, pause stopped it, and reset restored ' + startedAt + ' seconds.');
 }
 
-const MOVE_NAME = /move|→|←|›|‹|»|«|➡|⬅|▶|◀|⇒|⇐|>|<|right|left|next|prev|back|forward/i;
+const MOVE_NAME = /\bmove\b|→|←|›|‹|»|«|➡|⬅|▶|◀|⇒|⇐|>|<|\bright\b|\bleft\b|\bnext\b|\bprev|\bback\b|\bforward\b/i;
 const FORWARD_NAME = /→|›|»|➡|▶|⇒|>|right|next|forward/i;
 const BACKWARD_NAME = /←|‹|«|⬅|◀|⇐|<|left|prev|back/i;
 
@@ -198,15 +198,19 @@ async function cardX(page, label) {
   }, label);
 }
 
-// The text of the card that holds this button: its nearest ancestor with text outside buttons.
+// The title of the card that holds this button: the first text outside buttons in its nearest ancestor with text.
+// Only the title is tracked, because a card may show different badges or buttons in another column.
 async function cardLabel(button) {
   return button.evaluate((btn) => {
     let box = btn.parentElement;
     while (box && box !== document.body) {
-      const copy = box.cloneNode(true);
-      copy.querySelectorAll('button').forEach((inner) => inner.remove());
-      const text = (copy.textContent || '').replace(/\s+/g, ' ').trim();
-      if (text) return text;
+      const walker = document.createTreeWalker(box, NodeFilter.SHOW_TEXT);
+      let node = walker.nextNode();
+      while (node) {
+        const text = (node.textContent || '').replace(/\s+/g, ' ').trim();
+        if (text && node.parentElement && !node.parentElement.closest('button')) return text;
+        node = walker.nextNode();
+      }
       box = box.parentElement;
     }
     return '';

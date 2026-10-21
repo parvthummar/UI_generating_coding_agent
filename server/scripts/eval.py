@@ -1,5 +1,6 @@
 import difflib
 import json
+import os
 import subprocess
 import time
 from pathlib import Path
@@ -141,6 +142,7 @@ def run_prompt(session, prompt, phase):
     before = read_committed_files()
     started = time.perf_counter()
     model_calls = 0
+    type_rounds = 0
     fix_attempts = 0
     tool_errors = 0
     committed = False
@@ -151,6 +153,8 @@ def run_prompt(session, prompt, phase):
         name, data = parse_event(raw)
         if name == 'status' and data.get('phase') == 'thinking':
             model_calls += 1
+        if name == 'status' and data.get('phase') == 'type_errors':
+            type_rounds += 1
         if name == 'status' and data.get('phase') == 'fixing_error':
             fix_attempts += 1
             if data.get('reason'):
@@ -183,6 +187,7 @@ def run_prompt(session, prompt, phase):
         'result': result,
         'reason': reason,
         'model_calls': model_calls,
+        'type_rounds': type_rounds,
         'fix_attempts': fix_attempts,
         'tool_errors': tool_errors,
         'seconds': seconds,
@@ -204,6 +209,7 @@ def skipped_followup(follow, initial_id):
         'result': 'skipped',
         'reason': 'initial_failed',
         'model_calls': 0,
+        'type_rounds': 0,
         'fix_attempts': 0,
         'tool_errors': 0,
         'seconds': 0,
@@ -294,9 +300,12 @@ def summary_lines(rows):
     interaction = {'pass': 0, 'fail': 0, 'inconclusive': 0, 'not_run': 0, 'not_checked': 0}
     step_limit = 0
     corrections_exhausted = 0
+    self_corrected = 0
     for row in rows:
         if row['build_passed']:
             commits += 1
+            if row.get('type_rounds', 0) > 0 or row.get('fix_attempts', 0) > 0:
+                self_corrected += 1
         if row.get('render') == 'pass':
             render_pass += 1
         kind = row.get('interaction') or 'not_run'
@@ -322,6 +331,11 @@ def summary_lines(rows):
         + ' of '
         + str(len(rows))
         + '. That total mixes new UIs and follow-ups. Use the two rates above.',
+        'Committed rows where the agent had to fix its own compiler or validation errors first: '
+        + str(self_corrected)
+        + ' of '
+        + str(commits)
+        + '.',
         'Initial-render validation passed for '
         + str(render_pass)
         + ' of '
@@ -351,7 +365,13 @@ def write_results(rows):
     lines = [
         '# Eval results',
         '',
-        'Fresh run of `python -m scripts.eval` from the `server` folder.',
+        'Fresh run of `python -m scripts.eval` from the `server` folder on '
+        + time.strftime('%Y-%m-%d')
+        + ', model `'
+        + os.environ.get('LLM_MODEL', '')
+        + '`.',
+        '"Type-error steps" counts build steps where the type check found errors and sent them back to the model. '
+        + '"Fix attempts" counts failed final checks (type check, build, browser render), at most 3.',
         'Each initial prompt starts from the starter project. A follow-up runs only after that prompt commits, in the same session, against the committed UI.',
         'Passing the type check is not enough to commit: the staged project must also pass the production build and the browser smoke test.',
         '',
@@ -360,8 +380,8 @@ def write_results(rows):
     lines.extend(
         [
             '',
-            '| # | Phase | Prompt | Result | Reason | Render | Interaction | Model calls | Fix attempts | Tool errors | Seconds | Files changed | Previous lines kept |',
-            '| --- | --- | --- | --- | --- | --- | --- | --- | --- | --- | --- | --- | --- |',
+            '| # | Phase | Prompt | Result | Reason | Render | Interaction | Model calls | Type-error steps | Fix attempts | Tool errors | Seconds | Files changed | Previous lines kept |',
+            '| --- | --- | --- | --- | --- | --- | --- | --- | --- | --- | --- | --- | --- | --- |',
         ]
     )
     for row in rows:
@@ -383,6 +403,8 @@ def write_results(rows):
             + cell(row.get('interaction') or '')
             + ' | '
             + str(row['model_calls'])
+            + ' | '
+            + str(row.get('type_rounds', 0))
             + ' | '
             + str(row['fix_attempts'])
             + ' | '
