@@ -1,4 +1,5 @@
 import json
+import posixpath
 import re
 
 from app.llm import call_llm
@@ -24,7 +25,9 @@ NOT_SHOWN = ['src/main.tsx', 'src/index.css', 'src/vite-env.d.ts']
 NL = '\n'
 DIAG_RE = re.compile(r'(src/[A-Za-z0-9_./-]+\.tsx?)\((\d+),(\d+)\):\s+error\s+(TS\d+):\s+([^\n]+)')
 PATH_RE = re.compile(r'src/(?:[A-Za-z0-9_.\-]+/)*[A-Za-z0-9_.\-]+\.tsx?')
+MISSING_RE = re.compile(r"(src/[A-Za-z0-9_./-]+\.tsx?)\(\d+,\d+\):\s+error\s+TS2304:\s+Cannot find name '([A-Z][A-Za-z0-9_]*)'")
 FAILED_NOTE = 'FAILED and rolled back. No files were committed, the preview does not include this request.'
+SAME_ERROR_NOTE = 'This is the same error as before. Your last change did not fix it, try a different approach.'
 
 
 def sse(name, data):
@@ -85,6 +88,26 @@ def error_lines(errors):
     return NL + 'The lines with errors:' + NL + NL.join(lines)
 
 
+def import_hints(errors):
+    # "Cannot find name 'Hero'" while src/components/Hero.tsx exists is almost always a missing import.
+    hints = []
+    for match in MISSING_RE.finditer(errors.replace('\\', '/')):
+        rel = match.group(1)
+        name = match.group(2)
+        target = 'src/components/' + name + '.tsx'
+        if not (STAGING / target).is_file() or rel == target:
+            continue
+        module = posixpath.relpath('src/components/' + name, posixpath.dirname(rel))
+        if not module.startswith('.'):
+            module = './' + module
+        hint = rel + ' uses ' + name + ' without importing it. Add at the top: import ' + name + " from '" + module + "';"
+        if hint not in hints:
+            hints.append(hint)
+    if not hints:
+        return ''
+    return NL + NL.join(hints)
+
+
 def cited_files(errors):
     note = ''
     count = 0
@@ -106,9 +129,16 @@ def cited_files(errors):
 
 
 def correction_text(errors, same_as_before):
-    text = 'The check failed, nothing was committed. Fix these errors:' + NL + errors + error_lines(errors) + cited_files(errors)
+    text = 'The check failed, nothing was committed. Fix these errors:' + NL + errors + error_lines(errors) + import_hints(errors) + cited_files(errors)
     if same_as_before:
-        text += NL + 'This is the same error as before. Your last change did not fix it, try a different approach.'
+        text += NL + SAME_ERROR_NOTE
+    return text
+
+
+def interim_text(errors, same_as_before):
+    text = NL + NL + 'Type check after this step (nothing is committed yet):' + NL + errors + error_lines(errors) + import_hints(errors)
+    if same_as_before:
+        text += NL + SAME_ERROR_NOTE + ' Read the current files below before your next edit.' + cited_files(errors)
     return text
 
 
@@ -162,6 +192,7 @@ def _run_turn(session, user_text, state):
     changed = set()
     fix_retries = 0
     last_errors = ''
+    interim_seen = []
 
     for step in range(1, MAX_STEPS + 1):
         yield sse('status', {'phase': 'thinking', 'step': step})
@@ -206,8 +237,7 @@ def _run_turn(session, user_text, state):
             if call['name'] != 'read_file' and result.startswith('OK:') and not result.startswith('OK: no change'):
                 step_changed = True
             ok = not result.startswith('ERROR:')
-            if not ok:
-                print('tool error: ' + str(call['name']) + ': ' + result[:200].replace(NL, ' '))
+            print('tool: ' + str(call['name']) + ' ' + str(call['args'].get('path')) + ' -> ' + result[:120].replace(NL, ' '))
             yield sse('tool_call', {'name': call['name'], 'path': call['args'].get('path'), 'ok': ok})
             last_tool_message = {'role': 'tool', 'tool_call_id': call['id'], 'content': result}
             messages.append(last_tool_message)
@@ -216,9 +246,10 @@ def _run_turn(session, user_text, state):
             # Feedback only. Errors in a half-built project are normal, so this does not use a correction round.
             errors = run_tsc()
             if errors:
-                last_tool_message['content'] += (
-                    NL + NL + 'Type check after this step (nothing is committed yet):' + NL + errors + error_lines(errors)
-                )
+                print('type check: ' + errors[:300].replace(NL, ' | '))
+                # A model that toggles between two broken versions repeats an earlier error, not the last one.
+                last_tool_message['content'] += interim_text(errors, errors in interim_seen)
+                interim_seen.append(errors)
             else:
                 last_tool_message['content'] += NL + NL + 'Type check after this step: no errors.'
         if step == MAX_STEPS - 1:

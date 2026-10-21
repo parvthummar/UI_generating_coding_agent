@@ -142,7 +142,7 @@ def check_tools():
     check('ambiguous edit does not modify the file', dup_path.read_text(encoding='utf-8') == before_dup)
     same = set()
     result = edit('components/Dup.tsx', 'const a = 1;\nconst a = 1;\n', 'const a = 1;\nconst a = 1;\n', same)
-    check('identical edit does not count as a change', result.startswith('OK: no change') and len(same) == 0, result)
+    check('an edit that changes nothing is reported as an error', result.startswith('ERROR:') and 'nothing changed' in result and len(same) == 0, result[:200])
 
     write('components/Indent.tsx', 'export default function Indent() {\n    return (\n        <p>Old</p>\n    );\n}\n')
     result = edit('components/Indent.tsx', '  return (\n    <p>Old</p>', 'return (\n  <p>New</p>')
@@ -272,6 +272,13 @@ def check_context():
     again = correction_text('TypeScript check failed:\n' + errors, True)
     check('a repeated error asks for another approach', 'try a different approach' in again)
 
+    workspace.apply_template_app()
+    write('components/Testimonials.tsx', component('Testimonials', 'Quotes'))
+    write('App.tsx', 'export default function App() {\n  return <Testimonials />;\n}\n')
+    errors = validate.run_tsc()
+    text = correction_text(errors, False)
+    check('a missing component import gets the exact import line', "import Testimonials from './components/Testimonials';" in text, text[:400])
+
 
 def check_agent_loop():
     # Interim compiler errors while the UI is half built must not use correction rounds.
@@ -293,6 +300,29 @@ def check_agent_loop():
     check('interim errors do not use a correction round', 'fixing_error' not in events, events[:300])
     check('the finished UI commits', 'files_updated' in events and (workspace.SANDBOX_SRC / 'components' / 'Hero.tsx').exists())
     check('the commit event names the changed files', '"changed": ["src/App.tsx", "src/components/Hero.tsx"]' in events, events[-400:])
+
+    # A model that keeps repeating a broken state gets the current file text, still without a correction round.
+    workspace.apply_template_app()
+    broken = 'export default function App() {\n  return <Hero />;\n}\n'
+    other = 'export default function App() {\n  return <div><Hero /></div>;\n}\n'
+    replies = [
+        tool_reply([write_call('components/Hero.tsx', component('Hero', 'Hi')), write_call('App.tsx', broken)]),
+        tool_reply([write_call('App.tsx', other)]),
+        tool_reply([write_call('App.tsx', broken)]),
+        tool_reply([write_call('App.tsx', "import Hero from './components/Hero';\n" + broken)]),
+        text_reply('Fixed the import.'),
+    ]
+    seen = []
+    with Patch(scripted_llm(replies, seen), lambda: validate.run_tsc()):
+        events = events_of(run_turn(Session(), 'Build a hero'))
+    tool_texts = []
+    for message in seen[-1]:
+        if message.get('role') == 'tool':
+            tool_texts.append(message['content'])
+    check('a first interim error does not paste whole files', 'Current text of' not in tool_texts[1], tool_texts[1][-300:])
+    check('an error seen earlier in the turn brings the current file text', 'Current text of src/App.tsx' in tool_texts[3] and 'same error as before' in tool_texts[3], tool_texts[3][-300:])
+    check('interim errors carry the import hint', "import Hero from './components/Hero';" in tool_texts[1])
+    check('a repeated interim error still does not use a correction round', 'fixing_error' not in events and 'files_updated' in events)
 
     # Every tool call in one step runs, none are silently dropped.
     workspace.apply_template_app()

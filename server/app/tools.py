@@ -241,7 +241,7 @@ def edit_file(path, old_str, new_str, description):
     if old_str == '':
         return edit_failed('old_str is empty. Copy a unique snippet from the current text.', full, path)
     if old_str == new_str:
-        return 'OK: no change. old_str and new_str are the same, so the file was left unchanged.'
+        return with_current_text('ERROR: old_str and new_str are the same, so nothing changed.', full, path)
     count = text.count(old_str)
     if count > 1:
         return edit_failed('old_str matches ' + str(count) + ' places, include more surrounding lines.', full, path)
@@ -295,7 +295,7 @@ def run_tool(name, args, changed):
     except KeyError as err:
         return 'ERROR: missing argument ' + str(err)
 
-    if result.startswith('ERROR:') or result.startswith('OK: no change'):
+    if result.startswith('ERROR:'):
         return result
     path = args.get('path')
     if path and name in ('write_file', 'edit_file', 'delete_file'):
