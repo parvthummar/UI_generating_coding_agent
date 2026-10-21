@@ -25,7 +25,16 @@ NOT_SHOWN = ['src/main.tsx', 'src/index.css', 'src/vite-env.d.ts']
 NL = '\n'
 DIAG_RE = re.compile(r'(src/[A-Za-z0-9_./-]+\.tsx?)\((\d+),(\d+)\):\s+error\s+(TS\d+):\s+([^\n]+)')
 PATH_RE = re.compile(r'src/(?:[A-Za-z0-9_.\-]+/)*[A-Za-z0-9_.\-]+\.tsx?')
-MISSING_RE = re.compile(r"(src/[A-Za-z0-9_./-]+\.tsx?)\(\d+,\d+\):\s+error\s+TS2304:\s+Cannot find name '([A-Z][A-Za-z0-9_]*)'")
+MISSING_RE = re.compile(r"(src/[A-Za-z0-9_./-]+\.tsx?)\(\d+,\d+\):\s+error\s+TS2304:\s+Cannot find name '([A-Za-z_][A-Za-z0-9_]*)'")
+KNOWN_IMPORTS = {
+    'useState': "import { useState } from 'react';",
+    'useEffect': "import { useEffect } from 'react';",
+    'useMemo': "import { useMemo } from 'react';",
+    'useRef': "import { useRef } from 'react';",
+    'useCallback': "import { useCallback } from 'react';",
+    'ReactNode': "import type { ReactNode } from 'react';",
+    'LucideIcon': "import type { LucideIcon } from 'lucide-react';",
+}
 FAILED_NOTE = 'FAILED and rolled back. No files were committed, the preview does not include this request.'
 NO_TOOLS_NOTE = (
     'You did not call any tools, so nothing changed in the preview. '
@@ -85,12 +94,27 @@ def error_lines(errors):
             continue
         rows = text.splitlines()
         if 1 <= number <= len(rows):
-            lines.append(rel + ' line ' + str(number) + ': ' + rows[number - 1].strip()[:200])
+            row = rows[number - 1]
+            line = rel + ' line ' + str(number) + ': ' + row.strip()[:200]
+            column = int(match.group(3))
+            if match.group(4) == 'TS1127' and 1 <= column <= len(row):
+                line += NL + '  ' + character_note(row[column - 1])
+            lines.append(line)
         if len(lines) >= 10:
             break
     if not lines:
         return ''
     return NL + 'The lines with errors:' + NL + NL.join(lines)
+
+
+def character_note(char):
+    # "Invalid character" is invisible in a quoted line, so name the character.
+    if char == '\\':
+        return (
+            'The invalid character is a backslash. The code contains escaped text such as \\" or \\n. '
+            'Write plain quotes and real line breaks, not escape sequences.'
+        )
+    return 'The invalid character is U+' + format(ord(char), '04X') + '. Replace it with plain ASCII.'
 
 
 def import_hints(errors):
@@ -99,6 +123,13 @@ def import_hints(errors):
     for match in MISSING_RE.finditer(errors.replace('\\', '/')):
         rel = match.group(1)
         name = match.group(2)
+        if name in KNOWN_IMPORTS:
+            hint = rel + ' uses ' + name + ' without importing it. Add at the top: ' + KNOWN_IMPORTS[name]
+            if hint not in hints:
+                hints.append(hint)
+            continue
+        if not name[:1].isupper():
+            continue
         target = 'src/components/' + name + '.tsx'
         if not (STAGING / target).is_file() or rel == target:
             continue

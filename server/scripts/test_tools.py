@@ -273,11 +273,23 @@ def check_context():
     check('a repeated error asks for another approach', 'try a different approach' in again)
 
     workspace.apply_template_app()
+    write('App.tsx', 'export default function App() {\n  return <div className=\\"p-4\\">Hi</div>;\n}\n')
+    errors = validate.run_tsc()
+    text = correction_text(errors, False)
+    check('an escaped quote in code is named as a backslash', 'TS1127' in errors and 'invalid character is a backslash' in text, text[:400])
+    write('App.tsx', 'const label = \u201cHi\u201d;\nexport default function App() { return <div>{label}</div>; }\n')
+    text = correction_text(validate.run_tsc(), False)
+    check('a curly quote is named by its code point', 'U+201C' in text, text[:400])
+
+    workspace.apply_template_app()
     write('components/Testimonials.tsx', component('Testimonials', 'Quotes'))
     write('App.tsx', 'export default function App() {\n  return <Testimonials />;\n}\n')
     errors = validate.run_tsc()
     text = correction_text(errors, False)
     check('a missing component import gets the exact import line', "import Testimonials from './components/Testimonials';" in text, text[:400])
+    write('App.tsx', 'export default function App() {\n  const [n] = useState(1);\n  return <div>{n}</div>;\n}\n')
+    text = correction_text(validate.run_tsc(), False)
+    check('a missing React hook import gets the exact import line', "import { useState } from 'react';" in text, text[:400])
 
 
 def check_agent_loop():
