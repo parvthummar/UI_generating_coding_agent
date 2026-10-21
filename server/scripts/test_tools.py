@@ -205,6 +205,12 @@ def check_agent_loop():
         check('runtime failure does not commit', 'files_updated' not in events and 'rolled_back' in events)
         check('runtime failure names the reason', '"reason": "runtime"' in events)
         check('three correction attempts are allowed', events.count('fixing_error') == 3)
+        same_error = False
+        for batch in seen_messages:
+            for message in batch:
+                if message.get('role') == 'user' and 'same error as before' in message.get('content', ''):
+                    same_error = True
+        check('repeated identical validation says to try another approach', same_error)
         check('failed generation leaves the preview', workspace.read_committed_files() == before)
         check(
             'failed generation leaves descriptions',
@@ -215,6 +221,141 @@ def check_agent_loop():
     finally:
         agent_module.call_llm = original_llm
         agent_module.validate_staged = original_validate
+
+
+def budget_llm(replies, seen_messages):
+    def call(messages):
+        seen_messages.append(list(messages))
+        last = ''
+        if messages:
+            last = messages[-1].get('content') or ''
+        if 'build budget is used' in last:
+            yield ('reply', text_reply('Stopping so validation can run.'))
+            return
+        yield ('reply', replies.pop(0))
+
+    return call
+
+
+def always_tool_llm(seen_messages):
+    def call(messages):
+        seen_messages.append(list(messages))
+        yield (
+            'reply',
+            tool_reply(
+                [
+                    {
+                        'name': 'write_file',
+                        'args': {
+                            'path': 'components/Again.tsx',
+                            'content': 'export const again = 1;\n',
+                            'description': 'Repeated write while the budget runs out.',
+                        },
+                    }
+                ]
+            ),
+        )
+
+    return call
+
+
+def check_reference_and_budget():
+    workspace.apply_template_app()
+    write(
+        'components/Widget.tsx',
+        'export default function Widget() { return <div>Widget</div>; }\n',
+        'A widget component.',
+    )
+    seen = set()
+    tools.run_tool('read_file', {'path': 'App.tsx'}, set(), seen)
+    write(
+        'App.tsx',
+        'export default function App() { return <div><Widget /></div>; }\n',
+        'Page that uses Widget without importing it.',
+        set(),
+        seen,
+    )
+    errors = "sandbox/.staging/src/App.tsx(1,45): error TS2304: Cannot find name 'Widget'."
+    hint = agent_module.symbol_context(errors)
+    check(
+        'undefined component points at the matching file',
+        'src/components/Widget.tsx' in hint and 'default function' in hint,
+        hint[:400],
+    )
+    check('correction hint includes an import', "import Widget from './components/Widget'" in hint, hint[:400])
+    missing = agent_module.symbol_context("src/App.tsx(1,1): error TS2304: Cannot find name 'MissingPiece'.")
+    check('a name with no export says to create the file', 'not exported' in missing and 'MissingPiece' in missing, missing[:300])
+    local_name = agent_module.symbol_context("src/App.tsx(2,8): error TS2304: Cannot find name 'toggleUnit'.")
+    check(
+        'a local name is not treated as a missing component',
+        'Do not create a new component file' in local_name and 'export default function toggleUnit' not in local_name,
+        local_name[:300],
+    )
+
+    original_llm = agent_module.call_llm
+    original_validate = agent_module.validate_staged
+    original_tsc = agent_module.run_tsc
+    try:
+        workspace.apply_template_app()
+        before = workspace.read_committed_files()
+        before_desc = workspace.read_description_map(workspace.SANDBOX_DESCRIPTIONS)
+        replies = []
+        index = 0
+        while index < agent_module.MAX_STEPS:
+            replies.append(
+                tool_reply(
+                    [
+                        {
+                            'name': 'write_file',
+                            'args': {
+                                'path': 'components/Piece' + str(index) + '.tsx',
+                                'content': 'export const piece' + str(index) + ' = ' + str(index) + ';\n',
+                                'description': 'Piece ' + str(index) + '.',
+                            },
+                        }
+                    ]
+                )
+            )
+            index += 1
+        seen_messages = []
+        agent_module.call_llm = budget_llm(replies, seen_messages)
+        agent_module.run_tsc = lambda: ''
+        agent_module.validate_staged = lambda: ''
+        events = ''.join(list(run_turn(Session(), 'Keep writing until the budget ends')))
+        saw_budget = False
+        for batch in seen_messages:
+            for message in batch:
+                if 'build budget is used' in (message.get('content') or ''):
+                    saw_budget = True
+        check('a full tool budget gets one chance to stop', saw_budget)
+        check('stopping after the budget can still commit', 'files_updated' in events)
+        check(
+            'the finalized project keeps its descriptions',
+            workspace.read_description_map(workspace.SANDBOX_DESCRIPTIONS).get('src/components/Piece0.tsx') == 'Piece 0.',
+        )
+
+        workspace.apply_template_app()
+        before = workspace.read_committed_files()
+        before_desc = workspace.read_description_map(workspace.SANDBOX_DESCRIPTIONS)
+        seen_messages = []
+        agent_module.call_llm = always_tool_llm(seen_messages)
+        agent_module.run_tsc = lambda: ''
+        agent_module.validate_staged = lambda: (
+            "TypeScript check failed:\nsrc/App.tsx(1,1): error TS2304: Cannot find name 'Nope'."
+        )
+        session = Session()
+        events = ''.join(list(run_turn(session, 'Keep calling tools past the budget')))
+        check('tool calls after the budget still require a clean check', 'files_updated' not in events and 'rolled_back' in events)
+        check('unfinished work leaves the committed source', workspace.read_committed_files() == before)
+        check(
+            'unfinished work leaves the committed descriptions',
+            workspace.read_description_map(workspace.SANDBOX_DESCRIPTIONS) == before_desc,
+        )
+        check('the session records that rollback', session.rollback_pending)
+    finally:
+        agent_module.call_llm = original_llm
+        agent_module.validate_staged = original_validate
+        agent_module.run_tsc = original_tsc
 
 
 def check_validation():
@@ -310,6 +451,58 @@ def check_validation():
         effect.startswith('Runtime smoke test failed') and 'effect-crash' in effect,
         effect[:500] if effect else '',
     )
+
+
+def check_behavior():
+    import subprocess
+
+    workspace.apply_template_app()
+    build_errors = validate.run_production_build()
+    check('behavior fixture can build the starter', build_errors == '', build_errors[:300] if build_errors else '')
+    dist = workspace.STAGING / 'dist'
+    script = workspace.REPO / 'sandbox' / 'scripts' / 'behave.mjs'
+    result = subprocess.run(
+        ['node', str(script), str(dist), 'todo'],
+        capture_output=True,
+        text=True,
+        timeout=60,
+        cwd=str(workspace.REPO / 'sandbox'),
+    )
+    output = (result.stdout or '') + (result.stderr or '')
+    check('a screen with no task field is not an interaction pass', 'BEHAVE_INCONCLUSIVE' in output and 'BEHAVE_PASS' not in output, output[:300])
+
+    seen = set()
+    tools.run_tool('read_file', {'path': 'App.tsx'}, set(), seen)
+    write(
+        'App.tsx',
+        "import { useState } from 'react';\n"
+        + 'export default function App() {\n'
+        + "  const [items, setItems] = useState([]);\n"
+        + "  const [text, setText] = useState('');\n"
+        + '  return (\n'
+        + '    <div>\n'
+        + '      <input aria-label="Task" value={text} onChange={(event) => setText(event.target.value)} />\n'
+        + '      <button onClick={() => { if (text) { setItems(items.concat(text)); setText(""); } }}>Add</button>\n'
+        + '      <p>{items.length} left</p>\n'
+        + '      <ul>{items.map((item) => <li key={item}>{item}</li>)}</ul>\n'
+        + '    </div>\n'
+        + '  );\n'
+        + '}\n',
+        'Task list that shows how many items are left.',
+        set(),
+        seen,
+    )
+    build_errors = validate.run_production_build()
+    check('behavior fixture builds a task list', build_errors == '', build_errors[:300] if build_errors else '')
+    result = subprocess.run(
+        ['node', str(script), str(dist), 'todo'],
+        capture_output=True,
+        text=True,
+        timeout=60,
+        cwd=str(workspace.REPO / 'sandbox'),
+    )
+    output = (result.stdout or '') + (result.stderr or '')
+    check('adding a task shows the remaining count', 'BEHAVE_PASS' in output, output[:400])
 
 
 def main():
@@ -528,7 +721,9 @@ def main():
 
     check_descriptions()
     check_agent_loop()
+    check_reference_and_budget()
     check_validation()
+    check_behavior()
 
     # Leave sandbox clean for the running preview
     workspace.apply_template_app()

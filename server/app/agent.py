@@ -22,6 +22,12 @@ MAX_CALLS_PER_FIX = 4
 MAX_CALLS_PER_STEP = 4
 NL = '\n'
 PATH_RE = re.compile(r'src/(?:[A-Za-z0-9_.\-]+/)*[A-Za-z0-9_.\-]+\.tsx?')
+NAME_RE = re.compile(r"Cannot find name '([A-Za-z_][A-Za-z0-9_]*)'")
+FINALIZE_TEXT = (
+    'The build budget is used. Stop calling tools. '
+    'The staged project will be typechecked, built, and smoke-tested. '
+    'Do not create more files unless a later correction says the check failed.'
+)
 
 
 def sse(name, data):
@@ -49,6 +55,153 @@ def files_cited_in_errors(errors):
         note += NL + 'Current text of ' + rel + ':' + NL + body
         cited.append(rel)
     return note, cited
+
+
+def _staged_sources():
+    root = STAGING / 'src'
+    found = []
+    if not root.exists():
+        return found
+    for path in root.rglob('*'):
+        if not path.is_file() or path.suffix not in ('.ts', '.tsx'):
+            continue
+        rel = 'src/' + str(path.relative_to(root)).replace('\\', '/')
+        if path.name in ('main.tsx', 'vite-env.d.ts'):
+            continue
+        try:
+            text = path.read_text(encoding='utf-8')
+        except (OSError, UnicodeError):
+            continue
+        found.append((rel, text))
+    found.sort()
+    return found
+
+
+def _export_kinds(text, name):
+    kinds = []
+    for line in text.splitlines():
+        stripped = line.strip()
+        if name not in stripped:
+            continue
+        if re.search(r'\bexport\s+default\s+function\s+' + name + r'\b', stripped):
+            kinds.append('default function')
+        elif re.search(r'\bexport\s+default\s+class\s+' + name + r'\b', stripped):
+            kinds.append('default class')
+        elif re.search(r'\bexport\s+default\s+' + name + r'\b', stripped):
+            kinds.append('default export')
+        elif re.search(r'\bexport\s+(?:const|let|var|function|class)\s+' + name + r'\b', stripped):
+            kinds.append('named export')
+        elif re.search(r'\b(?:function|class)\s+' + name + r'\b', stripped):
+            kinds.append('declared but not exported')
+    unique = []
+    for kind in kinds:
+        if kind not in unique:
+            unique.append(kind)
+    return unique
+
+
+def _import_example(rel, kind, name):
+    module = './' + rel[len('src/'):]
+    if module.endswith('.tsx'):
+        module = module[:-4]
+    elif module.endswith('.ts'):
+        module = module[:-3]
+    if kind == 'named export':
+        return "import { " + name + " } from '" + module + "'"
+    if kind.startswith('default'):
+        return "import " + name + " from '" + module + "'"
+    return ''
+
+
+def _export_index(sources):
+    lines = []
+    for rel, text in sources:
+        if not rel.endswith('.tsx'):
+            continue
+        bits = []
+        for line in text.splitlines():
+            stripped = line.strip()
+            match = re.search(
+                r'^export\s+default\s+function\s+([A-Za-z_][A-Za-z0-9_]*)',
+                stripped,
+            )
+            if match:
+                bits.append('default function ' + match.group(1))
+                continue
+            match = re.search(
+                r'^export\s+(?:function|const|class)\s+([A-Za-z_][A-Za-z0-9_]*)',
+                stripped,
+            )
+            if match:
+                bits.append('named ' + match.group(1))
+        if bits:
+            lines.append(rel + ': ' + ', '.join(bits[:3]))
+        if len(lines) >= 12:
+            break
+    return lines
+
+
+def symbol_context(errors):
+    names = []
+    users = {}
+    for line in errors.splitlines():
+        match = NAME_RE.search(line)
+        if not match:
+            continue
+        name = match.group(1)
+        if name not in names:
+            names.append(name)
+        file_match = PATH_RE.search(line.replace('\\', '/'))
+        if file_match and name not in users:
+            users[name] = file_match.group(0)
+    if not names:
+        return ''
+    sources = _staged_sources()
+    lines = ['Undefined names in the staged project:']
+    for name in names[:8]:
+        hits = []
+        for rel, text in sources:
+            kinds = _export_kinds(text, name)
+            for kind in kinds:
+                example = _import_example(rel, kind, name)
+                detail = rel + ' has ' + kind + ' ' + name
+                if example and users.get(name, '').endswith('App.tsx'):
+                    detail += '. From src/App.tsx use ' + example
+                elif example:
+                    detail += '. Example import: ' + example
+                hits.append(detail)
+        if hits:
+            lines.append("'" + name + "' is already declared. " + ' '.join(hits[:4]))
+            lines.append(
+                'Add that import in '
+                + users.get(name, 'the file that uses it')
+                + '. Do not rename the component if this export already matches.'
+            )
+        else:
+            where = users.get(name, 'the file that uses it')
+            if name[:1].isupper():
+                lines.append(
+                    "'"
+                    + name
+                    + "' is not exported by any staged file. Create src/components/"
+                    + name
+                    + ".tsx with `export default function "
+                    + name
+                    + "` and import it where it is used."
+                )
+            else:
+                lines.append(
+                    "'"
+                    + name
+                    + "' is not declared in "
+                    + where
+                    + '. It is a local name, not a component. Declare it in that file, for example as state or a function. Do not create a new component file for it.'
+                )
+    index = _export_index(sources)
+    if index:
+        lines.append('Exports in the staged project:')
+        lines.extend(index)
+    return NL.join(lines)
 
 
 def build_user_message(text, rollback_pending=False, failed_request=''):
@@ -144,6 +297,8 @@ def _run_turn(session, user_text, acknowledge_rollback, state):
     last_errors = ''
     last_interim = ''
     same_interim = 0
+    gave_finalize = False
+    forced_validate = False
     step = 0
     limit = MAX_STEPS
 
@@ -165,6 +320,8 @@ def _run_turn(session, user_text, acknowledge_rollback, state):
             + NL
             + errors
             + note
+            + NL
+            + symbol_context(errors)
         )
         if same:
             text += (
@@ -252,7 +409,33 @@ def _run_turn(session, user_text, acknowledge_rollback, state):
                     + NL
                     + 'If you still plan to create files, keep going. If those files are written, stop calling tools even if this error remains. '
                     + 'The production build and browser smoke test run when you stop, and a failed check gives you a correction round.'
+                    + NL
+                    + symbol_context(interim)
                 )
+
+        if step >= MAX_STEPS and fix_retries == 0 and not gave_finalize:
+            gave_finalize = True
+            messages.append({'role': 'user', 'content': FINALIZE_TEXT})
+            limit = step + 1
+            continue
+
+        if gave_finalize and not forced_validate and step > MAX_STEPS and changed:
+            forced_validate = True
+            yield sse('status', {'phase': 'validating'})
+            errors = validate_staged()
+            if errors == '':
+                commit_staging_to_sandbox()
+                state['committed'] = True
+                session.add_turn(user_text, 'Validated the staged project after the build budget.', sorted(changed))
+                session.mark_committed()
+                yield sse('files_updated', {'files': read_committed_files()})
+                yield sse('assistant_message', {'text': 'Validated the staged project after the build budget.'})
+                return
+            status = begin_correction(errors)
+            if status is None:
+                break
+            yield sse('status', status)
+            continue
 
     reset_staging_from_sandbox()
     detail = last_errors[:500]

@@ -1,14 +1,22 @@
 import json
+import subprocess
 import time
 from pathlib import Path
 
 from app.agent import run_turn
 from app.sessions import Session
-from app.workspace import apply_template_app, read_committed_files
+from app.validate import run_production_build
+from app.workspace import STAGING, apply_template_app, read_committed_files
 
 REPO = Path(__file__).resolve().parents[2]
 OUT = REPO / 'eval' / 'results.md'
 PAUSE_SECONDS = 5
+BEHAVIOR = {
+    'F2': 'todo',
+    '5': 'pomodoro',
+    '7': 'kanban',
+    '8': 'weather',
+}
 
 CASES = [
     {
@@ -155,6 +163,9 @@ def run_prompt(session, prompt, phase):
         'seconds': seconds,
         'files_changed': files,
         'detail': error_message[:500],
+        'render': 'pass' if result == 'committed' else ('fail' if reason == 'runtime' else 'not_reached'),
+        'interaction': 'not_run',
+        'interaction_detail': '',
     }
 
 
@@ -171,6 +182,9 @@ def skipped_followup(follow, initial_id):
         'tool_errors': 0,
         'seconds': 0,
         'files_changed': [],
+        'render': 'not_run',
+        'interaction': 'not_run',
+        'interaction_detail': '',
         'detail': (
             'Not executed. Initial prompt '
             + initial_id
@@ -178,6 +192,48 @@ def skipped_followup(follow, initial_id):
             + 'The server would refuse the follow-up before any model call.'
         ),
     }
+
+
+def run_behavior(scenario):
+    errors = run_production_build()
+    if errors:
+        return 'not_checked', 'The staged build failed before the interaction check.'
+    script = REPO / 'sandbox' / 'scripts' / 'behave.mjs'
+    dist = STAGING / 'dist'
+    try:
+        result = subprocess.run(
+            ['node', str(script), str(dist), scenario],
+            capture_output=True,
+            text=True,
+            timeout=60,
+            cwd=str(REPO / 'sandbox'),
+        )
+    except subprocess.TimeoutExpired:
+        return 'not_checked', 'The interaction check timed out.'
+    output = ((result.stdout or '') + '\n' + (result.stderr or '')).strip()
+    reason = ''
+    for line in output.splitlines():
+        if line.startswith('BEHAVE_') or line.strip() == '':
+            continue
+        reason = line.strip()
+        break
+    if 'BEHAVE_PASS' in output:
+        return 'pass', reason
+    if 'BEHAVE_INCONCLUSIVE' in output:
+        return 'inconclusive', reason
+    if 'BEHAVE_FAIL' in output:
+        return 'fail', reason or 'The interaction check failed.'
+    return 'not_checked', output[:300]
+
+
+def attach_behavior(row):
+    scenario = BEHAVIOR.get(row.get('id'))
+    if not scenario or not row.get('build_passed'):
+        return
+    kind, detail = run_behavior(scenario)
+    row['interaction'] = kind
+    row['interaction_detail'] = detail
+    print('INTERACTION ' + row['id'] + ' ' + kind + ' ' + detail)
 
 
 def cell(value):
@@ -208,9 +264,23 @@ def summary_lines(rows):
         if row['build_passed']:
             follow_ok += 1
     commits = 0
+    render_pass = 0
+    interaction = {'pass': 0, 'fail': 0, 'inconclusive': 0, 'not_run': 0, 'not_checked': 0}
+    step_limit = 0
+    corrections_exhausted = 0
     for row in rows:
         if row['build_passed']:
             commits += 1
+        if row.get('render') == 'pass':
+            render_pass += 1
+        kind = row.get('interaction') or 'not_run'
+        if kind not in interaction:
+            kind = 'not_run'
+        interaction[kind] += 1
+        if row.get('reason') == 'step_limit':
+            step_limit += 1
+        if row.get('reason') == 'compiler' and row.get('fix_attempts') == 3 and not row['build_passed']:
+            corrections_exhausted += 1
     return [
         'Initial generation: ' + str(initial_ok) + ' of ' + str(len(initial)) + ' committed.',
         'Follow-ups executed against a committed UI: '
@@ -226,6 +296,27 @@ def summary_lines(rows):
         + ' of '
         + str(len(rows))
         + '. That total mixes new UIs and follow-ups. Use the two rates above.',
+        'Initial-render validation passed for '
+        + str(render_pass)
+        + ' of '
+        + str(len(rows))
+        + ' rows. A commit requires the staged smoke test, so a committed row passed the initial render. A rolled-back row did not.',
+        'Functional interaction checks, only on the todo follow-up, Pomodoro, Kanban, and weather prompts when those UIs committed: '
+        + str(interaction['pass'])
+        + ' passed, '
+        + str(interaction['fail'])
+        + ' failed, '
+        + str(interaction['inconclusive'])
+        + ' inconclusive, '
+        + str(interaction['not_checked'])
+        + ' not checked, '
+        + str(interaction['not_run'])
+        + ' not run. A mount is not an interaction pass.',
+        'Step-limit rollbacks: '
+        + str(step_limit)
+        + '. Compiler correction exhausted after 3 attempts: '
+        + str(corrections_exhausted)
+        + '.',
     ]
 
 
@@ -243,8 +334,8 @@ def write_results(rows):
     lines.extend(
         [
             '',
-            '| # | Phase | Prompt | Result | Reason | Model calls | Fix attempts | Tool errors | Seconds | Files changed |',
-            '| --- | --- | --- | --- | --- | --- | --- | --- | --- | --- |',
+            '| # | Phase | Prompt | Result | Reason | Render | Interaction | Model calls | Fix attempts | Tool errors | Seconds | Files changed |',
+            '| --- | --- | --- | --- | --- | --- | --- | --- | --- | --- | --- | --- |',
         ]
     )
     for row in rows:
@@ -261,6 +352,10 @@ def write_results(rows):
             + ' | '
             + cell(row['reason'])
             + ' | '
+            + cell(row.get('render') or '')
+            + ' | '
+            + cell(row.get('interaction') or '')
+            + ' | '
             + str(row['model_calls'])
             + ' | '
             + str(row['fix_attempts'])
@@ -276,6 +371,8 @@ def write_results(rows):
     for row in rows:
         if row.get('detail'):
             lines.append(row['id'] + ': ' + row['detail'])
+        if row.get('interaction_detail'):
+            lines.append(row['id'] + ' interaction: ' + row['interaction_detail'])
     lines.append('')
     OUT.write_text('\n'.join(lines), encoding='utf-8')
     print('Wrote ' + str(OUT))
@@ -292,6 +389,7 @@ def main():
         print('RUN ' + case['id'] + ': ' + case['prompt'])
         row = run_prompt(session, case['prompt'], 'initial')
         row['id'] = case['id']
+        attach_behavior(row)
         rows.append(row)
         print(row)
         time.sleep(PAUSE_SECONDS)
@@ -300,6 +398,7 @@ def main():
                 print('RUN ' + follow['id'] + ': ' + follow['prompt'])
                 follow_row = run_prompt(session, follow['prompt'], 'follow-up')
                 follow_row['id'] = follow['id']
+                attach_behavior(follow_row)
                 rows.append(follow_row)
                 print(follow_row)
                 time.sleep(PAUSE_SECONDS)
