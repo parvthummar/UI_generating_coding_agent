@@ -14,16 +14,12 @@ type RuntimeError = {
   stack?: string;
 };
 
-type Rollback = {
-  failedRequest: string;
-};
-
 let nextId = 1;
 
 function statusText(data: { phase?: string; step?: number; attempt?: number }) {
   if (data.phase === 'thinking') return 'Thinking (step ' + data.step + ')';
-  if (data.phase === 'validating') return 'Checking the compiler';
-  if (data.phase === 'fixing_error') return 'Fixing a compiler error (attempt ' + data.attempt + ')';
+  if (data.phase === 'validating') return 'Checking types, build and render';
+  if (data.phase === 'fixing_error') return 'Fixing an error (attempt ' + data.attempt + ' of 3)';
   if (data.phase === 'waiting_for_rate_limit') return 'Waiting for the rate limit';
   return data.phase || 'Working';
 }
@@ -36,7 +32,7 @@ export default function App() {
   const [selected, setSelected] = useState('');
   const [previewKey, setPreviewKey] = useState(0);
   const [runtimeError, setRuntimeError] = useState<RuntimeError | null>(null);
-  const [rollback, setRollback] = useState<Rollback | null>(null);
+  const [lastChanged, setLastChanged] = useState<string[]>([]);
   const [canUndo, setCanUndo] = useState(false);
   const [tab, setTab] = useState<'preview' | 'code'>('preview');
   const [chatPct, setChatPct] = useState(28);
@@ -95,11 +91,10 @@ export default function App() {
     setSelected((current) => (current && next[current] != null ? current : names[0] || ''));
   }
 
-  async function runTurn(text: string, acknowledgeRollback = false) {
+  async function runTurn(text: string) {
     if (!text || busy) return;
     setBusy(true);
     addItem('user', text);
-    if (acknowledgeRollback) setRollback(null);
     try {
       await sendMessage(text, (name, data) => {
         if (name === 'status') addItem('status', statusText(data));
@@ -108,20 +103,17 @@ export default function App() {
           addItem('tool', data.name + path + ', ' + (data.ok ? 'ok' : 'failed'));
         }
         if (name === 'files_updated') {
+          const changed: string[] = data.changed || [];
           applyFiles(data.files || {});
+          setLastChanged(changed);
+          if (changed.length > 0) setSelected(changed[changed.length - 1]);
           setPreviewKey((key) => key + 1);
           setRuntimeError(null);
-          setRollback(null);
           setCanUndo(true);
         }
         if (name === 'assistant_message') addItem('assistant', data.text || '');
-        if (name === 'error') {
-          addItem('error', data.message || 'The turn failed');
-          if (data.code === 'rolled_back' || data.code === 'followup_blocked') {
-            setRollback({ failedRequest: data.failed_request || '' });
-          }
-        }
-      }, acknowledgeRollback);
+        if (name === 'error') addItem('error', data.message || 'The turn failed');
+      });
     } catch (err: any) {
       addItem('error', err.message || String(err));
     } finally {
@@ -132,29 +124,8 @@ export default function App() {
   async function onSend() {
     const text = draft.trim();
     if (!text || busy) return;
-    if (rollback) {
-      addItem(
-        'error',
-        'This follow-up was not sent. The last generation was rolled back, so that UI is not in the preview. Retry it, or send this as a new UI.',
-      );
-      return;
-    }
     setDraft('');
-    await runTurn(text, false);
-  }
-
-  async function onRetry() {
-    if (!rollback || busy) return;
-    const text = rollback.failedRequest;
-    if (!text) return;
-    await runTurn(text, true);
-  }
-
-  async function onSendAsNew() {
-    const text = draft.trim();
-    if (!text || busy) return;
-    setDraft('');
-    await runTurn(text, true);
+    await runTurn(text);
   }
 
   function onFix() {
@@ -166,7 +137,7 @@ export default function App() {
       '\n' +
       'Stack: ' +
       (runtimeError.stack || '');
-    runTurn(text, rollback != null);
+    runTurn(text);
   }
 
   async function onUndo() {
@@ -175,9 +146,9 @@ export default function App() {
     try {
       const result = await undoCommit();
       applyFiles(result.files);
+      setLastChanged([]);
       setPreviewKey((key) => key + 1);
       setRuntimeError(null);
-      setRollback(null);
       setCanUndo(result.remaining > 0);
       addItem('assistant', 'Restored the previous committed UI.');
     } catch (err: any) {
@@ -194,7 +165,7 @@ export default function App() {
       await resetSession();
       setItems([]);
       setRuntimeError(null);
-      setRollback(null);
+      setLastChanged([]);
       setCanUndo(false);
       setPreviewKey((key) => key + 1);
       await refreshFiles();
@@ -290,36 +261,10 @@ export default function App() {
               }
             }}
           />
-          {rollback && (
-            <div className="mb-2 rounded border border-red-200 bg-red-50 px-3 py-2 text-sm text-red-800">
-              <p>
-                The last generation was rolled back. The preview is still the committed UI. Follow-ups stay
-                paused so they cannot treat that missing UI as if it were created.
-              </p>
-              <div className="mt-2 flex flex-wrap gap-2">
-                <button
-                  className="rounded bg-red-800 px-3 py-1 text-white disabled:opacity-50"
-                  type="button"
-                  onClick={onRetry}
-                  disabled={busy || rollback.failedRequest === ''}
-                >
-                  Retry failed request
-                </button>
-                <button
-                  className="rounded border border-red-300 px-3 py-1 disabled:opacity-50"
-                  type="button"
-                  onClick={onSendAsNew}
-                  disabled={busy || draft.trim() === ''}
-                >
-                  Send as a new UI
-                </button>
-              </div>
-            </div>
-          )}
           <button
             className="mt-2 rounded bg-stone-900 px-4 py-2 text-sm text-white disabled:opacity-50"
             type="submit"
-            disabled={busy || draft.trim() === '' || rollback != null}
+            disabled={busy || draft.trim() === ''}
           >
             {busy ? 'Working' : 'Send'}
           </button>
@@ -335,7 +280,7 @@ export default function App() {
             Code
           </TabButton>
           <p className="ml-auto self-center text-xs text-stone-500">
-            {rollback ? 'Committed preview, last generation rolled back' : 'Committed preview'}
+            {lastChanged.length > 0 ? 'Last change: ' + lastChanged.join(', ') : 'Committed preview'}
           </p>
         </div>
         {runtimeError && (
@@ -381,6 +326,7 @@ export default function App() {
                     }
                     onClick={() => setSelected(name)}
                   >
+                    {lastChanged.includes(name) ? '● ' : ''}
                     {name}
                   </button>
                 </li>

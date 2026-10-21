@@ -6,12 +6,11 @@ export type ChatEvent = {
 export async function sendMessage(
   text: string,
   onEvent: (name: string, data: any) => void,
-  acknowledgeRollback = false,
 ) {
   const res = await fetch('http://localhost:8000/api/chat', {
     method: 'POST',
     headers: { 'Content-Type': 'application/json' },
-    body: JSON.stringify({ message: text, acknowledge_rollback: acknowledgeRollback }),
+    body: JSON.stringify({ message: text }),
   });
   if (!res.ok) {
     let message = 'Request failed';
