@@ -204,6 +204,170 @@ def symbol_context(errors):
     return NL.join(lines)
 
 
+DIAG_RE = re.compile(
+    r'(src/[A-Za-z0-9_./-]+\.tsx?)\((\d+),(\d+)\):\s+error\s+(TS\d+):\s+([^\n]+)'
+)
+CHAR_NAMES = {
+    '\u201c': 'left double quote',
+    '\u201d': 'right double quote',
+    '\u2018': 'left single quote',
+    '\u2019': 'right single quote',
+    '\ufeff': 'byte order mark',
+    '\u00a0': 'non-breaking space',
+    '\u200b': 'zero-width space',
+}
+
+
+def _source_by_rel():
+    found = {}
+    for rel, text in _staged_sources():
+        found[rel] = text
+    return found
+
+
+def _parse_diagnostics(errors):
+    found = []
+    text = errors.replace('\\', '/')
+    for match in DIAG_RE.finditer(text):
+        found.append({
+            'file': match.group(1),
+            'line': int(match.group(2)),
+            'column': int(match.group(3)),
+            'code': match.group(4),
+            'message': match.group(5).strip(),
+        })
+    return found
+
+
+def _quoted(line):
+    text = line.strip()
+    if len(text) > 160:
+        text = text[:160] + '...'
+    return text
+
+
+def _declaration_lines(text, name):
+    hits = []
+    pattern = re.compile(r'\b' + re.escape(name) + r'\b')
+    decl = re.compile(r'\b(import|export|const|let|var|function|class|interface|type|enum)\b')
+    for number, line in enumerate(text.splitlines(), 1):
+        if pattern.search(line) and decl.search(line):
+            hits.append((number, _quoted(line)))
+    if len(hits) < 2:
+        for number, line in enumerate(text.splitlines(), 1):
+            if pattern.search(line):
+                item = (number, _quoted(line))
+                if item not in hits:
+                    hits.append(item)
+    return hits[:6]
+
+
+def _named_message(message):
+    match = re.search(r"Duplicate identifier '([^']+)'", message)
+    if match:
+        return match.group(1)
+    match = re.search(r"Cannot redeclare block-scoped variable '([^']+)'", message)
+    if match:
+        return match.group(1)
+    return ''
+
+
+def _line_window(text, line_number):
+    rows = text.splitlines()
+    if line_number < 1:
+        return []
+    start = max(1, line_number - 2)
+    end = min(len(rows), line_number + 2)
+    window = []
+    number = start
+    while number <= end:
+        window.append(str(number) + ': ' + _quoted(rows[number - 1]))
+        number += 1
+    return window
+
+
+def diagnostic_context(errors):
+    diagnostics = _parse_diagnostics(errors)
+    interesting = []
+    for item in diagnostics:
+        if item['code'] in ('TS2300', 'TS2451', 'TS1127', 'TS1128'):
+            interesting.append(item)
+    if not interesting:
+        return ''
+    sources = _source_by_rel()
+    lines = ['Staged source for these compiler errors:']
+    seen = set()
+    for item in interesting:
+        key = item['code'] + ' ' + item['file'] + ' ' + item['message']
+        if key in seen:
+            continue
+        seen.add(key)
+        text = sources.get(item['file'], '')
+        rows = text.splitlines()
+        if item['code'] in ('TS2300', 'TS2451'):
+            name = _named_message(item['message'])
+            decls = _declaration_lines(text, name) if name else []
+            if item['code'] == 'TS2300':
+                lines.append(
+                    'Duplicate identifier '
+                    + ("'" + name + "' " if name else '')
+                    + 'in '
+                    + item['file']
+                    + '. Keep one declaration and remove the other with edit_file.'
+                )
+            else:
+                lines.append(
+                    'Block-scoped '
+                    + ("'" + name + "' " if name else 'name ')
+                    + 'is declared more than once in '
+                    + item['file']
+                    + '. Delete the extra declaration and keep the one the rest of the function uses.'
+                )
+            if decls:
+                for number, line in decls:
+                    lines.append('  line ' + str(number) + ': ' + line)
+            else:
+                lines.append('  The compiler reported ' + item['message'] + ' but no matching declaration line was found.')
+        elif item['code'] == 'TS1127':
+            if item['line'] < 1 or item['line'] > len(rows):
+                lines.append(item['file'] + ' has an invalid character, but line ' + str(item['line']) + ' is outside the file.')
+                continue
+            row = rows[item['line'] - 1]
+            character = ''
+            if 1 <= item['column'] <= len(row):
+                character = row[item['column'] - 1]
+            label = CHAR_NAMES.get(character, '')
+            code = ''
+            if character:
+                code = 'U+' + format(ord(character), '04X')
+            lines.append(
+                'Invalid character in '
+                + item['file']
+                + ' at line '
+                + str(item['line'])
+                + ', column '
+                + str(item['column'])
+                + (': ' + code if code else '')
+                + (' (' + label + ')' if label else '')
+                + '. Replace that character with plain ASCII. Do not rewrite the rest of the file.'
+            )
+            lines.append('  line ' + str(item['line']) + ': ' + _quoted(row))
+        else:
+            lines.append(
+                'The syntax of '
+                + item['file']
+                + ' breaks at line '
+                + str(item['line'])
+                + '. Fix the brace, stray token, or unfinished declaration there. Do not rewrite unrelated files.'
+            )
+            if item['line'] > len(rows):
+                lines.append('  The file has only ' + str(len(rows)) + ' lines, so the extra token is after the last line.')
+            else:
+                for row in _line_window(text, item['line']):
+                    lines.append('  ' + row)
+    return NL.join(lines)
+
+
 def build_user_message(text, rollback_pending=False, failed_request=''):
     catalog = catalog_text(SANDBOX_SRC, SANDBOX_DESCRIPTIONS)
     header = (
@@ -322,6 +486,8 @@ def _run_turn(session, user_text, acknowledge_rollback, state):
             + note
             + NL
             + symbol_context(errors)
+            + NL
+            + diagnostic_context(errors)
         )
         if same:
             text += (
@@ -411,6 +577,8 @@ def _run_turn(session, user_text, acknowledge_rollback, state):
                     + 'The production build and browser smoke test run when you stop, and a failed check gives you a correction round.'
                     + NL
                     + symbol_context(interim)
+                    + NL
+                    + diagnostic_context(interim)
                 )
 
         if step >= MAX_STEPS and fix_retries == 0 and not gave_finalize:

@@ -259,6 +259,59 @@ def always_tool_llm(seen_messages):
     return call
 
 
+def check_diagnostics():
+    workspace.apply_template_app()
+    seen = set()
+    tools.run_tool('read_file', {'path': 'App.tsx'}, set(), seen)
+    write(
+        'App.tsx',
+        "import React from 'react';\nimport * as React from 'react';\nexport default function App() { return <div>Hi</div>; }\n",
+        'Page with two React imports.',
+        set(),
+        seen,
+    )
+    duplicate = agent_module.diagnostic_context(
+        "src/App.tsx(1,8): error TS2300: Duplicate identifier 'React'.\n"
+        + "src/App.tsx(2,13): error TS2300: Duplicate identifier 'React'."
+    )
+    check('duplicate identifier lists both declarations', 'line 1:' in duplicate and 'line 2:' in duplicate and 'Keep one declaration' in duplicate, duplicate[:500])
+
+    write(
+        'components/Board.tsx',
+        'import { useState } from "react";\n'
+        + 'export default function Board() {\n'
+        + '  const [todo, setTodo] = useState([]);\n'
+        + '  const [todo, setTodo] = useState([]);\n'
+        + '  return <div>{todo.length}</div>;\n'
+        + '}\n',
+        'Board that declares the same state twice.',
+    )
+    redeclared = agent_module.diagnostic_context(
+        "src/components/Board.tsx(3,10): error TS2451: Cannot redeclare block-scoped variable 'todo'."
+    )
+    check('redeclared state lists both lines', 'line 3:' in redeclared and 'line 4:' in redeclared and 'Delete the extra declaration' in redeclared, redeclared[:500])
+
+    fancy = 'const label = \u201cHello\u201d;\nexport default function App() { return <div>{label}</div>; }\n'
+    column = fancy.index('\u201c') + 1
+    write('App.tsx', fancy, 'Page with a curly quote.', set(), seen)
+    invalid = agent_module.diagnostic_context(
+        'src/App.tsx(1,' + str(column) + '): error TS1127: Invalid character.'
+    )
+    check('invalid character names the code point', 'U+201C' in invalid and 'plain ASCII' in invalid, invalid[:500])
+
+    write(
+        'App.tsx',
+        'export default function App() {\n  return <div>Hi</div>;\n}\n}\n',
+        'Page with an extra closing brace.',
+        set(),
+        seen,
+    )
+    broken = agent_module.diagnostic_context(
+        'src/App.tsx(4,1): error TS1128: Declaration or statement expected.'
+    )
+    check('syntax error quotes the breaking line', 'breaks at line 4' in broken and '4:' in broken, broken[:500])
+
+
 def check_reference_and_budget():
     workspace.apply_template_app()
     write(
@@ -453,31 +506,40 @@ def check_validation():
     )
 
 
-def check_behavior():
+def run_behavior(scenario):
     import subprocess
 
-    workspace.apply_template_app()
-    build_errors = validate.run_production_build()
-    check('behavior fixture can build the starter', build_errors == '', build_errors[:300] if build_errors else '')
-    dist = workspace.STAGING / 'dist'
     script = workspace.REPO / 'sandbox' / 'scripts' / 'behave.mjs'
+    dist = workspace.STAGING / 'dist'
     result = subprocess.run(
-        ['node', str(script), str(dist), 'todo'],
+        ['node', str(script), str(dist), scenario],
         capture_output=True,
         text=True,
         timeout=60,
         cwd=str(workspace.REPO / 'sandbox'),
     )
-    output = (result.stdout or '') + (result.stderr or '')
-    check('a screen with no task field is not an interaction pass', 'BEHAVE_INCONCLUSIVE' in output and 'BEHAVE_PASS' not in output, output[:300])
+    return (result.stdout or '') + (result.stderr or '')
 
+
+def put_app(content, description):
     seen = set()
     tools.run_tool('read_file', {'path': 'App.tsx'}, set(), seen)
-    write(
-        'App.tsx',
+    return write('App.tsx', content, description, set(), seen)
+
+
+def check_behavior():
+    workspace.apply_template_app()
+    build_errors = validate.run_production_build()
+    check('behavior fixture can build the starter', build_errors == '', build_errors[:300] if build_errors else '')
+    output = run_behavior('todo')
+    check('a screen with no task field is not an interaction pass', 'BEHAVE_INCONCLUSIVE' in output and 'BEHAVE_PASS' not in output, output[:300])
+    output = run_behavior('weather')
+    check('a screen with no unit control is inconclusive', 'BEHAVE_INCONCLUSIVE' in output and 'BEHAVE_PASS' not in output, output[:300])
+
+    put_app(
         "import { useState } from 'react';\n"
         + 'export default function App() {\n'
-        + "  const [items, setItems] = useState([]);\n"
+        + "  const [items, setItems] = useState(['Wash', 'Cook']);\n"
         + "  const [text, setText] = useState('');\n"
         + '  return (\n'
         + '    <div>\n'
@@ -488,21 +550,117 @@ def check_behavior():
         + '    </div>\n'
         + '  );\n'
         + '}\n',
-        'Task list that shows how many items are left.',
-        set(),
-        seen,
+        'Task list that starts with two items.',
     )
     build_errors = validate.run_production_build()
     check('behavior fixture builds a task list', build_errors == '', build_errors[:300] if build_errors else '')
-    result = subprocess.run(
-        ['node', str(script), str(dist), 'todo'],
-        capture_output=True,
-        text=True,
-        timeout=60,
-        cwd=str(workspace.REPO / 'sandbox'),
+    output = run_behavior('todo')
+    check('adding a task increases the existing remaining count', 'BEHAVE_PASS' in output and 'from 2 to 3' in output, output[:400])
+
+    put_app(
+        "import { useState } from 'react';\n"
+        + 'export default function App() {\n'
+        + "  const [items, setItems] = useState(['Wash']);\n"
+        + "  const [text, setText] = useState('');\n"
+        + '  return (\n'
+        + '    <div>\n'
+        + '      <input aria-label="Task" value={text} onChange={(event) => setText(event.target.value)} />\n'
+        + '      <button onClick={() => { if (text) { setItems(items.concat(text)); setText(""); } }}>Add</button>\n'
+        + '      <p>1 left</p>\n'
+        + '      <ul>{items.map((item) => <li key={item}>{item}</li>)}</ul>\n'
+        + '    </div>\n'
+        + '  );\n'
+        + '}\n',
+        'Task list whose count does not change.',
     )
-    output = (result.stdout or '') + (result.stderr or '')
-    check('adding a task shows the remaining count', 'BEHAVE_PASS' in output, output[:400])
+    build_errors = validate.run_production_build()
+    check('stale count fixture builds', build_errors == '', build_errors[:300] if build_errors else '')
+    output = run_behavior('todo')
+    check('a stale remaining count fails', 'BEHAVE_FAIL' in output and 'instead of increasing by one' in output, output[:400])
+
+    put_app(
+        "import { useEffect, useState } from 'react';\n"
+        + 'export default function App() {\n'
+        + '  const [seconds, setSeconds] = useState(10);\n'
+        + '  const [running, setRunning] = useState(false);\n'
+        + '  useEffect(() => {\n'
+        + '    if (!running) return;\n'
+        + '    const id = setInterval(() => setSeconds((value) => Math.max(0, value - 1)), 1000);\n'
+        + '    return () => clearInterval(id);\n'
+        + '  }, [running]);\n'
+        + "  const label = '0:' + String(seconds).padStart(2, '0');\n"
+        + '  return (\n'
+        + '    <div>\n'
+        + '      <p>{label}</p>\n'
+        + '      <button onClick={() => setRunning(true)}>Start</button>\n'
+        + '      <button onClick={() => setRunning(false)}>Pause</button>\n'
+        + '      <button onClick={() => { setRunning(false); setSeconds(10); }}>Reset</button>\n'
+        + '    </div>\n'
+        + '  );\n'
+        + '}\n',
+        'A short countdown with start, pause, and reset.',
+    )
+    build_errors = validate.run_production_build()
+    check('timer fixture builds', build_errors == '', build_errors[:300] if build_errors else '')
+    output = run_behavior('pomodoro')
+    check('countdown advances, pauses, and resets', 'BEHAVE_PASS' in output, output[:400])
+
+    put_app(
+        "import { useState } from 'react';\n"
+        + 'export default function App() {\n'
+        + "  const [cards, setCards] = useState({ todo: ['Paint'], done: ['Ship'] });\n"
+        + '  function move() { setCards({ todo: [], done: ["Ship", "Paint"] }); }\n'
+        + '  return (\n'
+        + '    <div>\n'
+        + '      <section><h2>Todo</h2><ul>{cards.todo.map((card) => <li key={card}>{card}<button onClick={move}>Move</button></li>)}</ul></section>\n'
+        + '      <section><h2>Done</h2><ul>{cards.done.map((card) => <li key={card}>{card}</li>)}</ul></section>\n'
+        + '    </div>\n'
+        + '  );\n'
+        + '}\n',
+        'Two columns with one move button.',
+    )
+    build_errors = validate.run_production_build()
+    check('board fixture builds', build_errors == '', build_errors[:300] if build_errors else '')
+    output = run_behavior('kanban')
+    check('a card move is detected across columns', 'BEHAVE_PASS' in output and 'another column' in output, output[:400])
+
+    put_app(
+        "import { useState } from 'react';\n"
+        + 'export default function App() {\n'
+        + '  const [moves, setMoves] = useState(0);\n'
+        + '  return (\n'
+        + '    <div>\n'
+        + '      <section><h2>Todo</h2><ul><li>Paint<button onClick={() => setMoves(moves + 1)}>Move</button></li></ul></section>\n'
+        + '      <section><h2>Done</h2><ul><li>Ship</li></ul></section>\n'
+        + '      <p>Moves: {moves}</p>\n'
+        + '    </div>\n'
+        + '  );\n'
+        + '}\n',
+        'A board whose move button does not move the card.',
+    )
+    build_errors = validate.run_production_build()
+    check('static card fixture builds', build_errors == '', build_errors[:300] if build_errors else '')
+    output = run_behavior('kanban')
+    check('a text change without a column move fails', 'BEHAVE_FAIL' in output and 'same column' in output, output[:400])
+
+    put_app(
+        "import { useState } from 'react';\n"
+        + 'export default function App() {\n'
+        + "  const [unit, setUnit] = useState('C');\n"
+        + "  const value = unit === 'C' ? 20 : 68;\n"
+        + '  return (\n'
+        + '    <div>\n'
+        + '      <p>{value}°{unit}</p>\n'
+        + "      <button onClick={() => setUnit(unit === 'C' ? 'F' : 'C')}>{unit === 'C' ? '°F' : '°C'}</button>\n"
+        + '    </div>\n'
+        + '  );\n'
+        + '}\n',
+        'A temperature display with a unit button.',
+    )
+    build_errors = validate.run_production_build()
+    check('weather fixture builds', build_errors == '', build_errors[:300] if build_errors else '')
+    output = run_behavior('weather')
+    check('a temperature unit change passes', 'BEHAVE_PASS' in output, output[:400])
 
 
 def main():
@@ -720,6 +878,7 @@ def main():
     check('runtime errors are reported to the host', "type: 'SANDBOX_RUNTIME_ERROR'" in sandbox_main)
 
     check_descriptions()
+    check_diagnostics()
     check_agent_loop()
     check_reference_and_budget()
     check_validation()
