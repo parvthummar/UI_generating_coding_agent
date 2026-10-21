@@ -163,8 +163,16 @@ async function pomodoro(page) {
   report('BEHAVE_PASS', 'The countdown advanced, pause stopped it, and reset restored ' + startedAt + ' seconds.');
 }
 
-const MOVE_NAME = /move|→|←|›|‹|»|«|right|left|next|prev|back|forward/i;
-const FORWARD_NAME = /move|→|›|»|right|next|forward/i;
+const MOVE_NAME = /move|→|←|›|‹|»|«|➡|⬅|▶|◀|⇒|⇐|>|<|right|left|next|prev|back|forward/i;
+const FORWARD_NAME = /→|›|»|➡|▶|⇒|>|right|next|forward/i;
+const BACKWARD_NAME = /←|‹|«|⬅|◀|⇐|<|left|prev|back/i;
+
+// Try forward moves first: a backward move on a card in the first column is a valid no-op.
+function moveRank(name) {
+  if (FORWARD_NAME.test(name)) return 0;
+  if (!BACKWARD_NAME.test(name)) return 1;
+  return 2;
+}
 
 // Center x of the card whose text, without its buttons, is exactly this label.
 async function cardX(page, label) {
@@ -207,24 +215,20 @@ async function kanban(page) {
     report('BEHAVE_INCONCLUSIVE', 'No move control was found.');
     return;
   }
-  const order = [];
+  const ranked = [[], [], []];
   for (let index = 0; index < count; index += 1) {
     const name = (await all.nth(index).innerText()) + ' ' + ((await all.nth(index).getAttribute('aria-label')) || '');
-    if (FORWARD_NAME.test(name)) order.push(index);
+    ranked[moveRank(name)].push(index);
   }
-  for (let index = 0; index < count; index += 1) {
-    if (!order.includes(index)) order.push(index);
-  }
+  const order = ranked[0].concat(ranked[1], ranked[2]);
   let tried = 0;
-  let lastLabel = '';
-  for (const index of order.slice(0, 3)) {
+  for (const index of order.slice(0, 4)) {
     const button = all.nth(index);
     const label = await cardLabel(button);
-    if (!label || label === lastLabel) continue;
+    if (!label) continue;
     const before = await cardX(page, label);
     if (before == null) continue;
     tried += 1;
-    lastLabel = label;
     await button.click();
     await page.waitForTimeout(300);
     const after = await cardX(page, label);

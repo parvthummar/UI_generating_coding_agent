@@ -533,6 +533,34 @@ def check_behavior():
     behavior_case('a card move is detected across columns', board, 'kanban', 'BEHAVE_PASS', 'another column')
     div_board = board.replace('<ul>', '<div>').replace('</ul>', '</div>').replace('<li key={card}>{card}', '<div key={card}><h3>{card}</h3>').replace('</li>', '</div>')
     behavior_case('cards rendered as divs with heading titles are detected', div_board, 'kanban', 'BEHAVE_PASS', 'another column')
+    two_way = (
+        "import { useState } from 'react';\n"
+        + 'export default function App() {\n'
+        + "  const [cols, setCols] = useState([['Paint'], ['Ship']]);\n"
+        + '  function shift(card: string, from: number, by: number) {\n'
+        + '    const to = Math.min(1, Math.max(0, from + by));\n'
+        + '    if (to === from) return;\n'
+        + '    const next = cols.map((col) => col.filter((c) => c !== card));\n'
+        + '    next[to] = next[to].concat(card);\n'
+        + '    setCols(next);\n'
+        + '  }\n'
+        + '  return (\n'
+        + '    <div className="flex gap-8">\n'
+        + '      {cols.map((col, i) => (\n'
+        + '        <div key={i} className="w-48"><h2>{i === 0 ? "Todo" : "Done"}</h2>\n'
+        + '          {col.map((card) => (\n'
+        + '            <div key={card}><h3>{card}</h3>\n'
+        + '              <button onClick={() => shift(card, i, -1)}>Move Left</button>\n'
+        + '              <button onClick={() => shift(card, i, 1)}>Move Right</button>\n'
+        + '            </div>\n'
+        + '          ))}\n'
+        + '        </div>\n'
+        + '      ))}\n'
+        + '    </div>\n'
+        + '  );\n'
+        + '}\n'
+    )
+    behavior_case('a left move on the first column does not hide a working right move', two_way, 'kanban', 'BEHAVE_PASS', 'another column')
     stuck_board = board.replace('function move() { setCards({ todo: [], done: ["Ship", "Paint"] }); }', 'function move() {}')
     behavior_case('a move button that does nothing fails', stuck_board, 'kanban', 'BEHAVE_FAIL', 'same column')
 
