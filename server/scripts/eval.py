@@ -1,3 +1,4 @@
+import difflib
 import json
 import subprocess
 import time
@@ -91,6 +92,12 @@ CASES = [
         'prompt': 'Weather card UI with mock data and a Celsius or Fahrenheit toggle',
         'followups': [],
     },
+    {
+        'id': 'E1',
+        'kind': 'Self-correction',
+        'prompt': 'Activity feed with 5 mock events that uses the date-fns library to show relative dates',
+        'followups': [],
+    },
 ]
 
 
@@ -112,6 +119,22 @@ def changed_files(before, after):
         if before.get(name) != after.get(name):
             changed.append(name)
     return changed
+
+
+def kept_share(before, after):
+    # Share of the previous lines that are still there after the turn. A full rewrite scores low.
+    total = 0
+    kept = 0
+    for name in before:
+        old_lines = before[name].splitlines()
+        new_lines = after.get(name, '').splitlines()
+        total += len(old_lines)
+        matcher = difflib.SequenceMatcher(None, old_lines, new_lines, autojunk=False)
+        for block in matcher.get_matching_blocks():
+            kept += block.size
+    if total == 0:
+        return ''
+    return str(round(100.0 * kept / total)) + '%'
 
 
 def run_prompt(session, prompt, phase):
@@ -142,10 +165,12 @@ def run_prompt(session, prompt, phase):
             reason = data.get('reason') or data.get('code') or 'error'
             error_message = data.get('message') or ''
     seconds = round(time.perf_counter() - started, 1)
-    files = changed_files(before, read_committed_files())
-    if failed and reason == 'followup_blocked':
-        result = 'blocked'
-    elif committed and not failed:
+    after = read_committed_files()
+    files = changed_files(before, after)
+    kept = ''
+    if phase == 'follow-up':
+        kept = kept_share(before, after)
+    if committed and not failed:
         result = 'committed'
     elif failed:
         result = 'rolled_back'
@@ -162,6 +187,7 @@ def run_prompt(session, prompt, phase):
         'tool_errors': tool_errors,
         'seconds': seconds,
         'files_changed': files,
+        'kept': kept,
         'detail': error_message[:500],
         'render': 'pass' if result == 'committed' else ('fail' if reason == 'runtime' else 'not_reached'),
         'interaction': 'not_run',
@@ -182,14 +208,14 @@ def skipped_followup(follow, initial_id):
         'tool_errors': 0,
         'seconds': 0,
         'files_changed': [],
+        'kept': '',
         'render': 'not_run',
         'interaction': 'not_run',
         'interaction_detail': '',
         'detail': (
             'Not executed. Initial prompt '
             + initial_id
-            + ' did not commit, so this row is not an iterative-edit result. '
-            + 'The server would refuse the follow-up before any model call.'
+            + ' did not commit, so this row is not an iterative-edit result.'
         ),
     }
 
@@ -334,8 +360,8 @@ def write_results(rows):
     lines.extend(
         [
             '',
-            '| # | Phase | Prompt | Result | Reason | Render | Interaction | Model calls | Fix attempts | Tool errors | Seconds | Files changed |',
-            '| --- | --- | --- | --- | --- | --- | --- | --- | --- | --- | --- | --- |',
+            '| # | Phase | Prompt | Result | Reason | Render | Interaction | Model calls | Fix attempts | Tool errors | Seconds | Files changed | Previous lines kept |',
+            '| --- | --- | --- | --- | --- | --- | --- | --- | --- | --- | --- | --- | --- |',
         ]
     )
     for row in rows:
@@ -365,6 +391,8 @@ def write_results(rows):
             + str(row['seconds'])
             + ' | '
             + cell(files)
+            + ' | '
+            + cell(row.get('kept') or '')
             + ' |'
         )
     lines.append('')
@@ -406,7 +434,7 @@ def main():
             for follow in case['followups']:
                 print('SKIP ' + follow['id'] + ' because ' + case['id'] + ' did not commit')
                 rows.append(skipped_followup(follow, case['id']))
-    order = ['1', 'F4', '2', 'F1', '3', 'F3', '4', 'F2', '5', '6', '7', '8']
+    order = ['1', 'F4', '2', 'F1', '3', 'F3', '4', 'F2', '5', '6', '7', '8', 'E1']
     by_id = {}
     for row in rows:
         by_id[row['id']] = row
