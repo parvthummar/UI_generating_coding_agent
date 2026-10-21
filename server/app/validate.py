@@ -11,7 +11,8 @@ def _relative_output(output):
     root = str(REPO).replace('\\', '/')
     if root and not root.endswith('/'):
         root = root + '/'
-    return text.replace(root, '')
+    # The model knows files as src/..., so drop the staging folder from paths.
+    return text.replace(root, '').replace('sandbox/.staging/', '')
 
 
 def _run(cmd, timeout, cwd):

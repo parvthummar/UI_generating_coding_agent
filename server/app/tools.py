@@ -4,10 +4,12 @@ from app.workspace import remove_staged_description, set_staged_description
 
 REPO = Path(__file__).resolve().parents[2]
 ROOT = (REPO / 'sandbox' / '.staging' / 'src').resolve()
+COMMITTED = (REPO / 'sandbox' / 'src').resolve()
 LOCKED = ['main.tsx', 'index.css']
 MAX_FILE_BYTES = 40 * 1024
 MAX_COMPONENT_FILES = 25
 MAX_DESCRIPTION_CHARS = 200
+MAX_REWRITE_LINES = 60
 
 
 TOOL_DEFINITIONS = [
@@ -15,11 +17,7 @@ TOOL_DEFINITIONS = [
         'type': 'function',
         'function': {
             'name': 'read_file',
-            'description': (
-                'Read the full source of one file under src/. '
-                'The file catalog lists paths and descriptions only. '
-                'Call this before edit_file, delete_file, or write_file on a file that already exists.'
-            ),
+            'description': 'Read the full source of one file under src/.',
             'parameters': {
                 'type': 'object',
                 'properties': {
@@ -34,10 +32,9 @@ TOOL_DEFINITIONS = [
         'function': {
             'name': 'write_file',
             'description': (
-                'Create a new file, or replace an existing file of 60 lines or fewer. '
-                'Requires a one-sentence description of the file. '
-                'Read an existing file with read_file before replacing it. '
-                'For a localized change, use edit_file instead.'
+                'Create a file, or replace its whole content. '
+                'A file that was already in the preview before this request and has more than 60 lines '
+                'cannot be replaced, use edit_file for it.'
             ),
             'parameters': {
                 'type': 'object',
@@ -49,7 +46,7 @@ TOOL_DEFINITIONS = [
                         'description': 'One sentence describing what this file is responsible for.',
                     },
                 },
-                'required': ['path', 'content', 'description'],
+                'required': ['path', 'content'],
             },
         },
     },
@@ -58,10 +55,8 @@ TOOL_DEFINITIONS = [
         'function': {
             'name': 'edit_file',
             'description': (
-                'Replace one exact copy of old_str with new_str in an existing file. '
-                'Call read_file first and copy old_str from that text. '
-                'old_str must match exactly once. '
-                'Pass description only when the file responsibility changes.'
+                'Replace old_str with new_str in an existing file. '
+                'old_str must be copied exactly from the current file and match exactly once.'
             ),
             'parameters': {
                 'type': 'object',
@@ -82,11 +77,7 @@ TOOL_DEFINITIONS = [
         'type': 'function',
         'function': {
             'name': 'delete_file',
-            'description': (
-                'Delete one file under src/ that the user asked to remove, and drop its description. '
-                'Cannot delete App.tsx. Call read_file first. '
-                'Do not delete unrelated files.'
-            ),
+            'description': 'Delete one file under src/. Cannot delete App.tsx.',
             'parameters': {
                 'type': 'object',
                 'properties': {
@@ -123,21 +114,27 @@ def safe_path(user_path):
     return full
 
 
-def clean_description(value, required):
-    if value is None:
-        if required:
-            return None, 'ERROR: description is required. Say what this file is responsible for in one sentence.'
-        return None, ''
+def clean_description(value):
     if not isinstance(value, str):
-        return None, 'ERROR: description must be a string of at most 200 characters.'
+        return None
     text = ' '.join(value.split())
     if text == '':
-        if required:
-            return None, 'ERROR: description is required. Say what this file is responsible for in one sentence.'
-        return None, ''
+        return None
     if len(text) > MAX_DESCRIPTION_CHARS:
-        return None, 'ERROR: description must be one sentence of at most 200 characters.'
-    return text, ''
+        text = text[:MAX_DESCRIPTION_CHARS]
+    return text
+
+
+def count_lines(text):
+    return len(text.replace('\r\n', '\n').splitlines())
+
+
+def committed_line_count(user_path):
+    # The rewrite limit protects files the user already sees. Files created in this turn can be rewritten.
+    committed = (COMMITTED / normalize_user_path(user_path)).resolve()
+    if COMMITTED not in committed.parents or not committed.is_file():
+        return 0
+    return count_lines(committed.read_text(encoding='utf-8'))
 
 
 def _count_component_files():
@@ -151,29 +148,11 @@ def _count_component_files():
     return count
 
 
-def _with_current_text(message, full, path):
+def with_current_text(message, full, path):
     body = full.read_text(encoding='utf-8')
-    if len(body) > 4000:
-        body = body[:4000] + '\n... truncated ...'
+    if len(body) > 8000:
+        body = body[:8000] + '\n... truncated ...'
     return message + '\nCurrent text of ' + str(path) + ':\n' + body
-
-
-def _read_required(path, tool_name, seen):
-    message = (
-        'ERROR: call read_file on this file before '
-        + tool_name
-        + '. The file catalog does not include source code. '
-        + 'Copy old_str from the text below if you edit, and keep the change local to the request.'
-    )
-    try:
-        full = safe_path(path)
-    except ValueError:
-        return message
-    if not full.exists():
-        return message
-    seen.add(normalize_user_path(path))
-    message = _with_current_text(message, full, path)
-    return message + '\nThe text above is enough for the next edit_file or write_file on this path in this turn.'
 
 
 def read_file(path):
@@ -183,41 +162,35 @@ def read_file(path):
     return full.read_text(encoding='utf-8')
 
 
-def write_file(path, content, description, seen):
+def write_file(path, content, description):
     if path is None or str(path).strip() == '':
         return 'ERROR: missing argument path'
     if not isinstance(content, str):
         return 'ERROR: missing argument content'
     full = safe_path(path)
-    text, error = clean_description(description, True)
-    if error:
-        return error
     if len(content.encode('utf-8')) > MAX_FILE_BYTES:
-        return 'ERROR: file is larger than 40 KB'
+        return 'ERROR: file is larger than 40 KB. Split it into smaller components.'
     if full.exists():
-        if normalize_user_path(path) not in seen:
-            return _read_required(path, 'write_file', seen)
-        existing = full.read_text(encoding='utf-8').replace('\r\n', '\n')
-        line_count = len(existing.splitlines()) or (1 if existing else 0)
-        if line_count > 60:
-            return (
-                'ERROR: this file has '
-                + str(line_count)
-                + ' lines. Use edit_file for a targeted change. '
-                + 'write_file can only replace files of 60 lines or fewer.'
+        lines = committed_line_count(path)
+        if lines > MAX_REWRITE_LINES:
+            return with_current_text(
+                'ERROR: ' + str(path) + ' was already in the preview and has ' + str(lines) + ' lines. '
+                'Use edit_file to change only the part the user asked for.',
+                full,
+                path,
             )
-    rel = normalize_user_path(path)
-    is_new_component = rel.startswith('components/')
-    if is_new_component and not full.exists():
+    elif normalize_user_path(path).startswith('components/'):
         if _count_component_files() >= MAX_COMPONENT_FILES:
             return 'ERROR: at most 25 files are allowed under components/'
     full.parent.mkdir(parents=True, exist_ok=True)
     full.write_text(content, encoding='utf-8')
-    set_staged_description(description_key(path), text)
-    return 'OK: wrote ' + str(path) + '. Description saved.'
+    text = clean_description(description)
+    if text:
+        set_staged_description(description_key(path), text)
+    return 'OK: wrote ' + str(path)
 
 
-def edit_file(path, old_str, new_str, description, seen):
+def edit_file(path, old_str, new_str, description):
     if path is None or str(path).strip() == '':
         return 'ERROR: missing argument path'
     if not isinstance(old_str, str) or not isinstance(new_str, str):
@@ -225,41 +198,37 @@ def edit_file(path, old_str, new_str, description, seen):
     full = safe_path(path)
     if not full.exists():
         return 'ERROR: file does not exist, use write_file to create it'
-    if normalize_user_path(path) not in seen:
-        return _read_required(path, 'edit_file', seen)
-    updated_description, error = clean_description(description, False)
-    if error:
-        return error
     text = full.read_text(encoding='utf-8').replace('\r\n', '\n')
     old_str = old_str.replace('\r\n', '\n')
     new_str = new_str.replace('\r\n', '\n')
     if old_str == '':
-        return 'ERROR: old_str is empty. Copy a unique snippet from read_file.'
+        return with_current_text('ERROR: old_str is empty. Copy a unique snippet from the current text.', full, path)
     count = text.count(old_str)
     if count == 0:
-        return _with_current_text(
-            'ERROR: old_str not found. Copy a unique snippet from the current text.',
+        return with_current_text(
+            'ERROR: old_str not found. Copy old_str exactly from the current text below.',
+            full,
+            path,
+        )
+    if count > 1:
+        return with_current_text(
+            'ERROR: old_str matches ' + str(count) + ' places, include more surrounding lines.',
             full,
             path,
         )
     if old_str == new_str:
         return 'OK: no change. old_str and new_str are the same, so the file was left unchanged.'
-    if count > 1:
-        return _with_current_text(
-            'ERROR: old_str matches ' + str(count) + ' places, include more surrounding lines.',
-            full,
-            path,
-        )
     updated = text.replace(old_str, new_str, 1)
     if len(updated.encode('utf-8')) > MAX_FILE_BYTES:
-        return 'ERROR: file is larger than 40 KB'
+        return 'ERROR: file is larger than 40 KB. Split it into smaller components.'
     full.write_text(updated, encoding='utf-8')
-    if updated_description is not None:
-        set_staged_description(description_key(path), updated_description)
+    text = clean_description(description)
+    if text:
+        set_staged_description(description_key(path), text)
     return 'OK: edited ' + str(path)
 
 
-def delete_file(path, seen):
+def delete_file(path):
     if path is None or str(path).strip() == '':
         return 'ERROR: missing argument path'
     full = safe_path(path)
@@ -267,45 +236,33 @@ def delete_file(path, seen):
         return 'ERROR: App.tsx cannot be deleted'
     if not full.exists():
         return 'ERROR: file does not exist'
-    if normalize_user_path(path) not in seen:
-        return _read_required(path, 'delete_file', seen)
     full.unlink()
     remove_staged_description(description_key(path))
     return 'OK: deleted ' + str(path)
 
 
-def run_tool(name, args, changed, seen=None):
-    if seen is None:
-        seen = set()
+def run_tool(name, args, changed):
     if args.get('_bad_json'):
         return 'ERROR: arguments were not valid JSON. Send the tool call again with complete arguments.'
     try:
         if name == 'read_file':
             result = read_file(args['path'])
         elif name == 'write_file':
-            result = write_file(args.get('path'), args.get('content'), args.get('description'), seen)
+            result = write_file(args.get('path'), args.get('content'), args.get('description'))
         elif name == 'edit_file':
-            result = edit_file(
-                args.get('path'),
-                args.get('old_str'),
-                args.get('new_str'),
-                args.get('description'),
-                seen,
-            )
+            result = edit_file(args.get('path'), args.get('old_str'), args.get('new_str'), args.get('description'))
         elif name == 'delete_file':
-            result = delete_file(args.get('path'), seen)
+            result = delete_file(args.get('path'))
         else:
-            result = 'ERROR: unknown tool ' + name
+            result = 'ERROR: unknown tool ' + str(name)
     except ValueError as err:
         return 'ERROR: ' + str(err)
     except KeyError as err:
         return 'ERROR: missing argument ' + str(err)
 
-    if result.startswith('ERROR:'):
+    if result.startswith('ERROR:') or result.startswith('OK: no change'):
         return result
     path = args.get('path')
-    if path and name in ('read_file', 'write_file', 'edit_file'):
-        seen.add(normalize_user_path(path))
-    if path and name in ('write_file', 'edit_file', 'delete_file') and not result.startswith('OK: no change'):
+    if path and name in ('write_file', 'edit_file', 'delete_file'):
         changed.add(normalize_user_path(path))
     return result

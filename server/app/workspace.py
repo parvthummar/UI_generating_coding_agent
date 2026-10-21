@@ -227,18 +227,6 @@ def sync_description_file(src_root, desc_path):
     return cleaned
 
 
-def catalog_text(src_root, desc_path):
-    files = project_files(src_root)
-    descriptions = sync_description_file(src_root, desc_path)
-    if not files:
-        return 'FILE CATALOG\n(no project files)'
-    lines = ['FILE CATALOG']
-    for rel in files:
-        desc = descriptions.get(rel) or '(no description yet)'
-        lines.append('- ' + rel + ' — ' + desc)
-    return '\n'.join(lines)
-
-
 def set_staged_description(key, text):
     cleaned = sync_description_file(STAGING_SRC, STAGING_DESCRIPTIONS)
     if key not in project_files(STAGING_SRC):

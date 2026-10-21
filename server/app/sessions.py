@@ -1,8 +1,6 @@
 class Session:
     def __init__(self):
         self.history = []
-        self.rollback_pending = False
-        self.failed_request = ''
 
     def add_turn(self, user_text, assistant_text, files_changed):
         note = assistant_text
@@ -16,15 +14,5 @@ class Session:
         while len(self.history) > 20:
             self.history.pop(0)
 
-    def mark_committed(self):
-        self.rollback_pending = False
-        self.failed_request = ''
-
-    def mark_rolled_back(self, user_text):
-        self.rollback_pending = True
-        self.failed_request = user_text
-
     def clear(self):
         self.history = []
-        self.rollback_pending = False
-        self.failed_request = ''

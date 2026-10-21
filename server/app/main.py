@@ -23,7 +23,6 @@ session = Session()
 
 class ChatRequest(BaseModel):
     message: str
-    acknowledge_rollback: bool = False
 
 
 @app.post('/api/chat')
@@ -33,7 +32,7 @@ def chat(body: ChatRequest):
 
     def stream():
         try:
-            for event in run_turn(session, body.message, body.acknowledge_rollback):
+            for event in run_turn(session, body.message):
                 yield event
         except Exception as err:
             yield sse('error', {'message': str(err)})
@@ -73,7 +72,6 @@ def undo():
             'Restored the previous committed UI. The preview matches that snapshot.',
             [],
         )
-        session.mark_committed()
         return {'files': files, 'remaining': snapshot_count()}
     finally:
         turn_lock.release()
