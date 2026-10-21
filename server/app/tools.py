@@ -1,6 +1,6 @@
 from pathlib import Path
 
-from app.workspace import remove_staged_description, set_staged_description
+from app.workspace import is_starter_app, remove_staged_description, set_staged_description
 
 REPO = Path(__file__).resolve().parents[2]
 ROOT = (REPO / 'sandbox' / '.staging' / 'src').resolve()
@@ -190,6 +190,41 @@ def write_file(path, content, description):
     return 'OK: wrote ' + str(path)
 
 
+def find_lines_ignoring_indent(text, old_str):
+    # Models often copy a snippet with different indentation. Match line by line on stripped text.
+    file_lines = text.split('\n')
+    wanted = []
+    for line in old_str.strip('\n').split('\n'):
+        wanted.append(line.strip())
+    if ''.join(wanted) == '':
+        return []
+    hits = []
+    last_start = len(file_lines) - len(wanted)
+    for start in range(0, last_start + 1):
+        same = True
+        for offset in range(len(wanted)):
+            if file_lines[start + offset].strip() != wanted[offset]:
+                same = False
+                break
+        if same:
+            hits.append(start)
+    return hits
+
+
+def replace_lines(text, start, count, new_str):
+    file_lines = text.split('\n')
+    new_lines = []
+    if new_str.strip('\n') != '':
+        new_lines = new_str.strip('\n').split('\n')
+    return '\n'.join(file_lines[:start] + new_lines + file_lines[start + count:])
+
+
+def edit_failed(message, full, path):
+    if committed_line_count(path) <= MAX_REWRITE_LINES:
+        message += ' Or replace the whole file with write_file.'
+    return with_current_text('ERROR: ' + message, full, path)
+
+
 def edit_file(path, old_str, new_str, description):
     if path is None or str(path).strip() == '':
         return 'ERROR: missing argument path'
@@ -199,26 +234,26 @@ def edit_file(path, old_str, new_str, description):
     if not full.exists():
         return 'ERROR: file does not exist, use write_file to create it'
     text = full.read_text(encoding='utf-8').replace('\r\n', '\n')
+    if normalize_user_path(path) == 'App.tsx' and is_starter_app(text):
+        return 'ERROR: src/App.tsx is still the blank starter. Replace the whole file with write_file.'
     old_str = old_str.replace('\r\n', '\n')
     new_str = new_str.replace('\r\n', '\n')
     if old_str == '':
-        return with_current_text('ERROR: old_str is empty. Copy a unique snippet from the current text.', full, path)
-    count = text.count(old_str)
-    if count == 0:
-        return with_current_text(
-            'ERROR: old_str not found. Copy old_str exactly from the current text below.',
-            full,
-            path,
-        )
-    if count > 1:
-        return with_current_text(
-            'ERROR: old_str matches ' + str(count) + ' places, include more surrounding lines.',
-            full,
-            path,
-        )
+        return edit_failed('old_str is empty. Copy a unique snippet from the current text.', full, path)
     if old_str == new_str:
         return 'OK: no change. old_str and new_str are the same, so the file was left unchanged.'
-    updated = text.replace(old_str, new_str, 1)
+    count = text.count(old_str)
+    if count > 1:
+        return edit_failed('old_str matches ' + str(count) + ' places, include more surrounding lines.', full, path)
+    if count == 1:
+        updated = text.replace(old_str, new_str, 1)
+    else:
+        hits = find_lines_ignoring_indent(text, old_str)
+        if len(hits) > 1:
+            return edit_failed('old_str matches ' + str(len(hits)) + ' places, include more surrounding lines.', full, path)
+        if len(hits) == 0:
+            return edit_failed('old_str not found. Copy old_str exactly from the current text below.', full, path)
+        updated = replace_lines(text, hits[0], len(old_str.strip('\n').split('\n')), new_str)
     if len(updated.encode('utf-8')) > MAX_FILE_BYTES:
         return 'ERROR: file is larger than 40 KB. Split it into smaller components.'
     full.write_text(updated, encoding='utf-8')

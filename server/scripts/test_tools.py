@@ -121,6 +121,8 @@ def check_tools():
     check('src/ prefix stays inside src', result.startswith('OK:') and from_src.exists() and not nested.exists(), result)
     check('a write is recorded as a change', 'components/FromSrc.tsx' in changed)
 
+    result = edit('App.tsx', '<div className="min-h-screen bg-white" />', "import X from './X';\n<X />")
+    check('editing the blank starter is refused', result.startswith('ERROR:') and 'write_file' in result, result)
     result = write('App.tsx', component('App', 'New first screen'))
     check('the starter App can be replaced without reading it first', result.startswith('OK:'), result)
 
@@ -141,6 +143,14 @@ def check_tools():
     same = set()
     result = edit('components/Dup.tsx', 'const a = 1;\nconst a = 1;\n', 'const a = 1;\nconst a = 1;\n', same)
     check('identical edit does not count as a change', result.startswith('OK: no change') and len(same) == 0, result)
+
+    write('components/Indent.tsx', 'export default function Indent() {\n    return (\n        <p>Old</p>\n    );\n}\n')
+    result = edit('components/Indent.tsx', '  return (\n    <p>Old</p>', 'return (\n  <p>New</p>')
+    indent_text = (workspace.STAGING_SRC / 'components' / 'Indent.tsx').read_text(encoding='utf-8')
+    check('an edit with different indentation still applies once', result.startswith('OK:') and '<p>New</p>' in indent_text and 'Old' not in indent_text, result[:200])
+    check('the indentation fallback keeps the rest of the file', indent_text.startswith('export default function Indent() {\n') and indent_text.endswith('    );\n}\n'), indent_text)
+    result = edit('components/Indent.tsx', 'not here', 'x')
+    check('a failed edit on a new file offers write_file', 'replace the whole file with write_file' in result, result[:200])
 
     crlf = workspace.STAGING_SRC / 'components' / 'Crlf.tsx'
     crlf.write_bytes(b'const a = 1;\r\nconst b = 2;\r\n')
@@ -178,6 +188,8 @@ def check_rewrite_rule():
     check('the refusal shows the current text', 'Current text of components/Big.tsx' in result)
     result = edit('components/Big.tsx', '<li>Row 3</li>', '<li>Row three</li>')
     check('a long committed file can still be edited', result.startswith('OK:'), result[:200])
+    result = edit('components/Big.tsx', 'not here', 'x')
+    check('a failed edit on a long committed file does not offer write_file', result.startswith('ERROR:') and 'write_file' not in result.split('\n')[0], result[:200])
 
     commit_files({'components/Small.tsx': component('Small', 'tiny')})
     result = write('components/Small.tsx', component('Small', 'replaced'))
@@ -226,6 +238,9 @@ def check_workspace():
 
 
 def check_context():
+    workspace.apply_template_app()
+    check('the message says when the project is the blank starter', 'blank starter' in build_user_message('build a form'))
+
     commit_files({
         'App.tsx': "import Header from './components/Header';\nexport default function App() { return <Header />; }\n",
         'components/Header.tsx': component('Header', 'Brand header'),
@@ -234,6 +249,7 @@ def check_context():
     check('the user message carries the committed source', 'Brand header' in message and '=== src/components/Header.tsx ===' in message)
     check('the user message keeps the request', message.endswith('User request: make it green'))
     check('locked files are not pasted', 'createRoot' not in message)
+    check('a built project is not called the starter', 'blank starter' not in message)
 
     big = {}
     for i in range(8):

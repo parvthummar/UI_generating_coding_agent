@@ -150,6 +150,11 @@ def _remove_empty_dirs(root: Path):
                 pass
 
 
+def is_starter_app(text):
+    starter = TEMPLATE_APP.read_text(encoding='utf-8').replace('\r\n', '\n').strip()
+    return text.replace('\r\n', '\n').strip() == starter
+
+
 def apply_template_app():
     clear_snapshots()
     SANDBOX_SRC.mkdir(parents=True, exist_ok=True)

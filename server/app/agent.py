@@ -10,6 +10,7 @@ from app.workspace import (
     SANDBOX_SRC,
     STAGING,
     commit_staging_to_sandbox,
+    is_starter_app,
     read_committed_files,
     reset_staging_from_sandbox,
     sync_description_file,
@@ -44,6 +45,8 @@ def build_user_message(text):
         else:
             shown += block
     message = 'Current project files. This is exactly what the preview shows now:' + NL + shown
+    if is_starter_app(files.get('src/App.tsx', '')):
+        message += NL + 'The project is still the blank starter. Write the components, then replace src/App.tsx with write_file.' + NL
     if hidden:
         message += NL + 'These files are not shown because the project is large. Call read_file before you change one:' + NL
         for name in hidden:
