@@ -126,10 +126,9 @@ function clockValues(text) {
 
 async function pomodoro(page) {
   const start = page.getByRole('button', { name: /start/i }).first();
-  const pause = page.getByRole('button', { name: /pause/i }).first();
   const reset = page.getByRole('button', { name: /reset/i }).first();
-  if ((await start.count()) === 0 || (await pause.count()) === 0 || (await reset.count()) === 0) {
-    report('BEHAVE_INCONCLUSIVE', 'Start, pause, and reset were not all found.');
+  if ((await start.count()) === 0 || (await reset.count()) === 0) {
+    report('BEHAVE_INCONCLUSIVE', 'Start and reset were not both found.');
     return;
   }
   const initial = clockValues(await bodyText(page));
@@ -145,7 +144,13 @@ async function pomodoro(page) {
     report('BEHAVE_FAIL', 'The countdown did not advance after start.');
     return;
   }
-  const pausedAt = running[0];
+  // Pause may be its own button or the start button relabeled as a toggle, so look for it now.
+  const pause = page.getByRole('button', { name: /pause|stop/i }).first();
+  if ((await pause.count()) === 0) {
+    report('BEHAVE_INCONCLUSIVE', 'No pause control was found while the timer was running.');
+    return;
+  }
+  const pausedAt = clockValues(await bodyText(page))[0];
   await pause.click();
   await page.waitForTimeout(1300);
   const held = clockValues(await bodyText(page));

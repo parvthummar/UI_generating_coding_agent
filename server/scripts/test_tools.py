@@ -546,6 +546,13 @@ def check_behavior():
         + '}\n'
     )
     behavior_case('countdown advances, pauses, and resets', timer, 'pomodoro', 'BEHAVE_PASS')
+    toggle = timer.replace(
+        '      <button onClick={() => setRunning(true)}>Start</button>\n      <button onClick={() => setRunning(false)}>Pause</button>\n',
+        "      <button onClick={() => setRunning(!running)}>{running ? 'Pause' : 'Start'}</button>\n",
+    )
+    behavior_case('a single start and pause toggle passes', toggle, 'pomodoro', 'BEHAVE_PASS')
+    frozen = timer.replace('setSeconds((value) => Math.max(0, value - 1))', 'setSeconds((value) => value)')
+    behavior_case('a timer that never counts down fails', frozen, 'pomodoro', 'BEHAVE_FAIL', 'did not advance')
 
     board = (
         "import { useState } from 'react';\n"
